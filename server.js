@@ -3178,48 +3178,53 @@ const htmlSlip = `
         }
 
         // B. Lister les plannings (avec détails de l'employé et du lieu)
+    // B. Lister les plannings (CORRIGÉ POUR AUTORISER LES DÉLÉGUÉS)
         else if (action === 'list-schedules') {
-            // Un employé mobile ne voit que ses propres plannings
-            // Un RH/Admin/Manager voit tous les plannings
-            const isMobileEmployee = req.user.employee_type && req.user.employee_type !== 'OFFICE';
-            const canSeeAllSchedules = req.user.permissions && req.user.permissions.can_see_employees;
+            
+            const perms = req.user.permissions || {};
+            
+            // 1. Définition des droits d'accès
+            const canSeeAll = perms.can_see_employees; // Les managers voient tout
+            const canSeeOwn = perms.can_manage_schedules; // Les délégués voient le leur
 
-                let query = supabase
+            // SÉCURITÉ : Si l'utilisateur n'a aucun des deux droits, dehors.
+            if (!canSeeAll && !canSeeOwn) {
+                return res.status(403).json({ error: "Accès refusé aux plannings" });
+            }
+
+            let query = supabase
                 .from('employee_schedules')
                 .select(`
                     *, 
                     employees(id, nom, matricule, employee_type, poste), 
                     mobile_locations(id, name, address, latitude, longitude, radius, type_location),
                     prescripteurs(id, nom_complet, fonction)
-                `) // <--- J'ai ajouté la liaison avec prescripteurs
+                `)
                 .order('schedule_date', { ascending: false })
                 .order('start_time', { ascending: true });
 
-            if (!canSeeAllSchedules && isMobileEmployee) {
+            // 2. FILTRAGE : Si ce n'est pas un manager global, il ne voit que SES missions
+            if (!canSeeAll) {
                 query = query.eq('employee_id', req.user.emp_id);
-            } else if (!canSeeAllSchedules && !isMobileEmployee) {
-                // Si ce n'est pas un RH/Admin et pas un employé mobile, il ne devrait pas voir cette route
-                return res.status(403).json({ error: "Accès refusé aux plannings" });
             }
 
             const { data, error } = await query;
             if (error) throw error;
 
-            // Mapping pour faciliter l'usage frontend
+            // Mapping
             const mappedSchedules = data.map(s => ({
                 id: s.id,
                 employee_id: s.employee_id,
                 employee_name: s.employees ? s.employees.nom : 'N/A',
-                employee_matricule: s.employees ? s.employees.matricule : 'N/A',
-                employee_type: s.employees ? s.employees.employee_type : 'N/A',
                 location_id: s.location_id,
                 location_name: s.mobile_locations ? s.mobile_locations.name : 'Lieu Inconnu',
-                prescripteur_nom: s.prescripteurs ? s.prescripteurs.nom_complet : null,
-                prescripteur_fonction: s.prescripteurs ? s.prescripteurs.fonction : null,
                 location_address: s.mobile_locations ? s.mobile_locations.address : 'N/A',
                 location_lat: s.mobile_locations ? s.mobile_locations.latitude : null,
                 location_lon: s.mobile_locations ? s.mobile_locations.longitude : null,
                 location_radius: s.mobile_locations ? s.mobile_locations.radius : null,
+                prescripteur_id: s.prescripteur_id,
+                prescripteur_nom: s.prescripteurs ? s.prescripteurs.nom_complet : null,
+                prescripteur_fonction: s.prescripteurs ? s.prescripteurs.fonction : null,
                 schedule_date: s.schedule_date,
                 start_time: s.start_time,
                 end_time: s.end_time,
@@ -4068,6 +4073,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
