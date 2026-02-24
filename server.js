@@ -3107,13 +3107,30 @@ const htmlSlip = `
             return res.json({ status: "success", data: data[0] });
         }
 
-        // B. Lister tous les lieux mobiles
+
+
+       // B. Lister tous les lieux mobiles (CORRIGÉ POUR DÉLÉGUÉS)
         else if (action === 'list-mobile-locations') {
-            // Peut être vu par ceux qui gèrent les employés ou la config
-            if (!req.user.permissions || (!req.user.permissions.can_manage_config && !req.user.permissions.can_see_employees)) {
+            
+            const p = req.user.permissions || {};
+
+            // LISTE DES PERMISSIONS QUI DONNENT LE DROIT DE VOIR LES LIEUX
+            const canView = 
+                p.can_manage_config ||          // Admin
+                p.can_see_employees ||          // Manager/RH
+                p.can_manage_schedules ||       // Délégué (pour planifier)
+                p.can_manage_mobile_locations;  // Délégué (si droit d'ajout)
+
+            if (!canView) {
                 return res.status(403).json({ error: "Accès refusé aux lieux mobiles" });
             }
-            const { data, error } = await supabase.from('mobile_locations').select('*').order('name', { ascending: true });
+
+            const { data, error } = await supabase
+                .from('mobile_locations')
+                .select('*')
+                .eq('is_active', true) // On ne montre que les lieux actifs
+                .order('name', { ascending: true });
+
             if (error) throw error;
             return res.json(data);
         }
@@ -4083,6 +4100,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
