@@ -1430,18 +1430,14 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
 
 
 
-  // ============================================================
-        // 10. GÉNÉRATEUR DE RAPPORTS (AMPLITUDE + FIX LOGIQUE ADMIN) ✅
-        // ============================================================
+
 // ============================================================
-        // 10. GÉNÉRATEUR DE RAPPORTS (AMPLITUDE + SÉCURITÉ ADMIN) ✅
+        // 10. GÉNÉRATEUR DE RAPPORTS (AMPLITUDE + ABSENCES + LIVE) ✅
         // ============================================================
         else if (action === 'read-report') {
-            // 1. DÉTECTION DU MODE ET DU CONTEXTE
             const isGlobalMode = req.query.mode === 'GLOBAL';
             const isPersonalMode = req.query.mode === 'PERSONAL';
             
-            // SÉCURITÉ : Pour voir le global, il faut le droit Dashboard
             if (isGlobalMode && !checkPerm(req, 'can_see_dashboard')) {
                 return res.status(403).json({ error: "Accès refusé aux rapports globaux" });
             }
@@ -1451,126 +1447,145 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
             const todayStr = now.toISOString().split('T')[0];
 
             try {
-                // 2. PRÉPARATION DE LA REQUÊTE AVEC LES INFOS EMPLOYÉS
-                let query = supabase
-                    .from('pointages')
-                    .select('*, employees!inner(nom, hierarchy_path, departement)');
+                // --- ÉTAPE 1 : RÉCUPÉRER LA LISTE DES EMPLOYÉS ATTENDUS ---
+                // On cible les actifs (ceux qui ne sont pas en sortie définitive)
+                let empQuery = supabase.from('employees')
+                    .select('id, nom, matricule, departement, hierarchy_path, statut')
+                    .not('statut', 'ilike', '%sortie%');
 
-                // 3. LOGIQUE DE FILTRAGE (QUI VOIT QUOI)
                 if (isPersonalMode) {
-                    // L'utilisateur ne voit que ses propres données
-                    query = query.eq('employee_id', req.user.emp_id);
+                    empQuery = empQuery.eq('id', req.user.emp_id);
                 } 
-                else if (isGlobalMode) {
-                    // --- PROTECTION ET POUVOIR ADMIN ---
-                    // Si l'utilisateur a le droit de voir tous les employés (ADMIN / RH)
-                    if (checkPerm(req, 'can_see_employees')) {
-                        console.log(`👑 ADMIN [${req.user.nom}] accède au rapport global.`);
-                        // AUCUN FILTRE SUPPLÉMENTAIRE : L'Admin voit tout.
-                    } 
-                    // Si c'est un simple MANAGER, on filtre par sa lignée
-                    else {
-                        const { data: requester } = await supabase.from('employees')
-                            .select('hierarchy_path, management_scope')
-                            .eq('id', req.user.emp_id)
-                            .single();
+                else if (isGlobalMode && !checkPerm(req, 'can_see_employees')) {
+                    // Logique Manager (Hierarchy/Scope) identique à la version précédente
+                    const { data: requester } = await supabase.from('employees')
+                        .select('hierarchy_path, management_scope')
+                        .eq('id', req.user.emp_id).single();
 
-                        if (requester) {
-                            let securityConditions = [];
-                            securityConditions.push(`employees.hierarchy_path.eq.${requester.hierarchy_path}`);
-                            securityConditions.push(`employees.hierarchy_path.ilike.${requester.hierarchy_path}/%`);
-
-                            if (requester.management_scope?.length > 0) {
-                                const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
-                                securityConditions.push(`employees.departement.in.${scopeList}`);
-                            }
-                            query = query.or(securityConditions.join(','));
+                    if (requester) {
+                        let securityConditions = [];
+                        securityConditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
+                        securityConditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
+                        if (requester.management_scope?.length > 0) {
+                            const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
+                            securityConditions.push(`departement.in.${scopeList}`);
                         }
+                        empQuery = empQuery.or(securityConditions.join(','));
                     }
                 }
 
-                // 4. FILTRAGE PAR PÉRIODE
+                const { data: employeesList, error: empErr } = await empQuery;
+                if (empErr) throw empErr;
+
+                // --- ÉTAPE 2 : RÉCUPÉRER LES POINTAGES SUR LA PÉRIODE ---
+                let ptgQuery = supabase.from('pointages').select('*');
                 if (period === 'today') {
-                    query = query.gte('heure', `${todayStr}T00:00:00`).lte('heure', `${todayStr}T23:59:59`);
+                    ptgQuery = ptgQuery.gte('heure', `${todayStr}T00:00:00`).lte('heure', `${todayStr}T23:59:59`);
                 } else {
                     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-                    query = query.gte('heure', startOfMonth);
+                    ptgQuery = ptgQuery.gte('heure', startOfMonth);
                 }
 
-                const { data: pointages, error } = await query.order('heure', { ascending: true });
-                if (error) throw error;
+                const { data: pointages, error: ptgErr } = await ptgQuery.order('heure', { ascending: true });
+                if (ptgErr) throw ptgErr;
 
-                // --- RENDU : AUJOURD'HUI (LISTE DES PRÉSENTS) ---
+                // --- ÉTAPE 3 : CONSTRUCTION DU RENDU ---
+
                 if (period === 'today') {
-                    const firstInMap = {};
-                    (pointages || []).forEach(p => {
-                        if (p.action === 'CLOCK_IN' && !firstInMap[p.employee_id]) {
-                            firstInMap[p.employee_id] = p;
-                        }
-                    });
+                    const report = employeesList.map(emp => {
+                        const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
+                        const firstIn = sesPointages.find(p => p.action === 'CLOCK_IN');
+                        const lastOut = [...sesPointages].reverse().find(p => p.action === 'CLOCK_OUT' && (p.is_final_out === true || p.is_final_out === 'true'));
 
-                    const report = Object.values(firstInMap).map(p => ({
-                        nom: p.employees ? p.employees.nom : "Inconnu",
-                        heure: new Date(p.heure).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'}),
-                        zone: p.zone_detectee || "Bureau",
-                        Statut: "PRÉSENT"
-                    }));
-                    return res.json(report);
-                } 
-                
-                // --- RENDU : MENSUEL (CALCUL D'AMPLITUDE) ---
-                else {
-                    const dailyStats = {};
-                    (pointages || []).forEach(p => {
-                        const empId = p.employee_id;
-                        const localDate = new Date(p.heure).toLocaleDateString('fr-CA'); 
-                        const groupKey = `${empId}_${localDate}`;
+                        let statut = "ABSENT";
+                        let arrivee = "--:--";
+                        let dureeStr = "0h 00m";
+                        let zone = "---";
 
-                        if (!dailyStats[groupKey]) {
-                            dailyStats[groupKey] = { empId, nom: p.employees?.nom || "Inconnu", firstIn: null, lastOut: null };
+                        if (firstIn) {
+                            arrivee = new Date(firstIn.heure).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'});
+                            zone = firstIn.zone_detectee || "Bureau";
+                            
+                            // CALCUL DE LA DURÉE (LIVE OU FIXE)
+                            const startTime = new Date(firstIn.heure).getTime();
+                            // Si déjà parti, on calcule jusqu'à la sortie, sinon jusqu'à MAINTENANT (Live)
+                            const endTime = lastOut ? new Date(lastOut.heure).getTime() : now.getTime();
+                            
+                            const diffMs = endTime - startTime;
+                            const diffMins = Math.max(0, Math.floor(diffMs / 60000));
+                            dureeStr = `${Math.floor(diffMins / 60)}h ${(diffMins % 60).toString().padStart(2, '0')}m`;
+                            
+                            statut = lastOut ? "PARTI" : "PRÉSENT";
                         }
 
-                        const time = new Date(p.heure).getTime();
-                        if (p.action === 'CLOCK_IN') {
-                            if (!dailyStats[groupKey].firstIn || time < dailyStats[groupKey].firstIn) dailyStats[groupKey].firstIn = time;
-                        } else if (p.action === 'CLOCK_OUT') {
-                            if (!dailyStats[groupKey].lastOut || time > dailyStats[groupKey].lastOut) dailyStats[groupKey].lastOut = time;
+                        // Si la personne est en congé déclaré dans le statut
+                        if (statut === "ABSENT" && emp.statut.toLowerCase().includes('cong')) {
+                            statut = "CONGÉ";
                         }
-                    });
 
-                    const monthlySummary = {};
-                    Object.values(dailyStats).forEach(day => {
-                        if (!monthlySummary[day.empId]) {
-                            monthlySummary[day.empId] = { nom: day.nom, totalMs: 0, joursPresence: 0 };
-                        }
-                        if (day.firstIn) monthlySummary[day.empId].joursPresence += 1;
-                        if (day.firstIn && day.lastOut) {
-                            const amplitudeMs = day.lastOut - day.firstIn;
-                            if (amplitudeMs > 0) monthlySummary[day.empId].totalMs += amplitudeMs;
-                        }
-                    });
-
-                    const finalReport = Object.values(monthlySummary).map(s => {
-                        const totalMinutes = Math.floor(s.totalMs / (1000 * 60));
-                        const hours = Math.floor(totalMinutes / 60);
-                        const mins = totalMinutes % 60;
                         return {
-                            mois: now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
-                            nom: s.nom,
-                            jours: s.joursPresence,
-                            heures: `${hours}h ${mins.toString().padStart(2, '0')}m`,
-                            Statut: "Clôturé"
+                            nom: emp.nom,
+                            matricule: emp.matricule,
+                            statut: statut,
+                            arrivee: arrivee,
+                            duree: dureeStr,
+                            zone: zone
                         };
                     });
 
-                    return res.json(finalReport);
+                    // On trie : les présents en haut
+                    report.sort((a, b) => (a.statut === "PRÉSENT" ? -1 : 1));
+                    return res.json(report);
+                } 
+                
+                else {
+                    // --- RENDU MENSUEL (Calcul par jour pour cumul fiable) ---
+                    const monthlySummary = employeesList.map(emp => {
+                        const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
+                        
+                        // On groupe par date
+                        const jours = {};
+                        sesPointages.forEach(p => {
+                            const d = new Date(p.heure).toISOString().split('T')[0];
+                            if (!jours[d]) jours[d] = { firstIn: null, lastOut: null };
+                            
+                            const time = new Date(p.heure).getTime();
+                            if (p.action === 'CLOCK_IN') {
+                                if (!jours[d].firstIn || time < jours[d].firstIn) jours[d].firstIn = time;
+                            } else if (p.action === 'CLOCK_OUT' && (p.is_final_out === true || p.is_final_out === 'true')) {
+                                if (!jours[d].lastOut || time > jours[d].lastOut) jours[d].lastOut = time;
+                            }
+                        });
+
+                        let totalMs = 0;
+                        let nbJours = 0;
+                        Object.values(jours).forEach(j => {
+                            if (j.firstIn) nbJours++;
+                            if (j.firstIn && j.lastOut) {
+                                const amplitude = j.lastOut - j.firstIn;
+                                if (amplitude > 0) totalMs += amplitude;
+                            }
+                        });
+
+                        const totalMinutes = Math.floor(totalMs / 60000);
+                        return {
+                            mois: now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
+                            nom: emp.nom,
+                            jours: nbJours,
+                            heures: `${Math.floor(totalMinutes / 60)}h ${(totalMinutes % 60).toString().padStart(2, '0')}m`,
+                            Statut: "Validé"
+                        };
+                    });
+
+                    return res.json(monthlySummary);
                 }
             } catch (err) {
-                console.error("Erreur Rapport:", err.message);
+                console.error("Erreur Rapport Impeccable:", err.message);
                 return res.status(500).json({ error: err.message });
             }
         }
 
+            
 
             
    else if (action === 'ingest-candidate') {
@@ -4004,6 +4019,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
