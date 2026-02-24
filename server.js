@@ -3109,32 +3109,42 @@ const htmlSlip = `
 
 
 
-       // B. Lister tous les lieux mobiles (CORRIGÉ POUR DÉLÉGUÉS)
+       // B. Lister les lieux (MODE STRICT / AVEUGLE)
         else if (action === 'list-mobile-locations') {
             
             const p = req.user.permissions || {};
+            const userId = req.user.emp_id;
 
-            // LISTE DES PERMISSIONS QUI DONNENT LE DROIT DE VOIR LES LIEUX
-            const canView = 
-                p.can_manage_config ||          // Admin
-                p.can_see_employees ||          // Manager/RH
-                p.can_manage_schedules ||       // Délégué (pour planifier)
-                p.can_manage_mobile_locations;  // Délégué (si droit d'ajout)
+            // 1. Droit d'entrée de base
+            const canView = p.can_manage_config || p.can_see_employees || p.can_manage_schedules || p.can_manage_mobile_locations;
+            if (!canView) return res.status(403).json({ error: "Accès refusé." });
 
-            if (!canView) {
-                return res.status(403).json({ error: "Accès refusé aux lieux mobiles" });
-            }
-
-            const { data, error } = await supabase
+            // 2. Préparation de la requête
+            let query = supabase
                 .from('mobile_locations')
                 .select('*')
-                .eq('is_active', true) // On ne montre que les lieux actifs
+                .eq('is_active', true)
                 .order('name', { ascending: true });
 
+            // 3. LE VERROUILLAGE (C'est ici qu'on applique ta demande)
+            const isSuperAdmin = p.can_manage_config || p.can_see_employees;
+
+            if (!isSuperAdmin) {
+                // SI DÉLÉGUÉ :
+                // Il ne voit QUE ce qu'il a créé (created_by_id = userId).
+                // On enlève le "OR created_by_id is null".
+                // Résultat : La "Base Pré-remplie" devient invisible pour lui.
+                query = query.eq('created_by_id', userId);
+            }
+
+            const { data, error } = await query;
             if (error) throw error;
             return res.json(data);
         }
 
+
+
+            
         // C. Mettre à jour un lieu mobile
         else if (action === 'update-mobile-location') {
             if (!req.user.permissions || !req.user.permissions.can_manage_config) {
@@ -3148,11 +3158,14 @@ const htmlSlip = `
             return res.json({ status: "success", data: data[0] });
         }
 
-        // D. Supprimer un lieu mobile
+      // D. Supprimer un lieu (RÉSERVÉ ADMIN/CONFIG UNIQUEMENT)
         else if (action === 'delete-mobile-location') {
+            
+            // Seul celui qui a le droit "Configuration" (Admin) peut supprimer
             if (!req.user.permissions || !req.user.permissions.can_manage_config) {
-                return res.status(403).json({ error: "Accès refusé à la suppression des lieux mobiles" });
+                return res.status(403).json({ error: "Interdit. Seul l'administrateur peut supprimer un lieu de la base." });
             }
+
             const { id } = req.body;
             const { error } = await supabase.from('mobile_locations').delete().eq('id', id);
             if (error) throw error;
@@ -4100,6 +4113,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
