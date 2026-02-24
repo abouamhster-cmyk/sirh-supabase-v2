@@ -242,7 +242,7 @@ if (action === 'login') {
                     console.warn(`⛔ Accès bloqué (Compte Révoqué) : ${user.nom_complet}`);
                     return res.json({ 
                         status: "revoked", // On change le statut ici
-                        message: "Accès révoqué. Votre contrat est marqué comme terminé. Veuillez contacter la direction ou les RH." 
+                        message: "Accès révoqué - STATUS : SORTIE . Veuillez contacter la direction ou les RH .." 
                     });
                 }
             }
@@ -4068,6 +4068,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
