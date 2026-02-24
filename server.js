@@ -1559,11 +1559,24 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
 
                         let totalMs = 0;
                         let nbJours = 0;
-                        Object.values(jours).forEach(j => {
-                            if (j.firstIn) nbJours++;
-                            if (j.firstIn && j.lastOut) {
-                                const amplitude = j.lastOut - j.firstIn;
-                                if (amplitude > 0) totalMs += amplitude;
+
+                        Object.keys(jours).forEach(dateStr => {
+                            const j = jours[dateStr];
+                            if (j.firstIn) {
+                                nbJours++;
+                                
+                                let finCalcul = j.lastOut;
+                                
+                                // 👇 LA CORRECTION EST ICI :
+                                // Si pas de sortie ET que c'est aujourd'hui, on utilise l'heure actuelle
+                                if (!finCalcul && dateStr === todayStr) {
+                                    finCalcul = now.getTime();
+                                }
+
+                                if (finCalcul && j.firstIn) {
+                                    const amplitude = finCalcul - j.firstIn;
+                                    if (amplitude > 0) totalMs += amplitude;
+                                }
                             }
                         });
 
@@ -4019,6 +4032,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
