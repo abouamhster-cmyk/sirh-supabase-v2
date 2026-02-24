@@ -211,7 +211,7 @@ app.all('/api/:action', upload.any(), async (req, res) => {
 
 
 // 1. LOGIN SÉCURISÉ (AVEC BLOCAGE DES SORTANTS)
-        if (action === 'login') {
+if (action === 'login') {
             const username = req.body.u || req.query.u;
             const password = req.body.p || req.query.p;
 
@@ -224,7 +224,7 @@ app.all('/api/:action', upload.any(), async (req, res) => {
 
             // VÉRIFICATION 1 : Identifiants corrects ?
             if (error || !user || user.password !== password) {
-                return res.json({ status: "error", message: "Identifiants incorrects" });
+                return res.json({ status: "error", message: "Identifiant ou mot de passe incorrect" });
             }
 
             const emp = (user.employees && user.employees.length > 0) ? user.employees[0] : null;
@@ -234,13 +234,16 @@ app.all('/api/:action', upload.any(), async (req, res) => {
                  return res.json({ status: "error", message: "Compte utilisateur non lié à une fiche employé" });
             }
 
-            // VÉRIFICATION 3 : LE "KILL SWITCH" (C'est ici qu'on bloque les virés)
+            // VÉRIFICATION 3 : LE "KILL SWITCH" (MODIFIÉ POUR ÊTRE EXPLICITE)
             if (emp) {
-                const statut = (emp.statut || '').trim(); // On nettoie les espaces
-                // On vérifie si le statut contient "Sortie" (ex: "Sortie", "Sortie Définitive", etc.)
-                if (statut.toLowerCase().includes('sortie')) {
-                    console.warn(`⛔ Tentative de connexion bloquée pour ${user.nom_complet} (Statut: ${statut})`);
-                    return res.json({ status: "error", message: "Accès révoqué. Votre contrat est marqué comme terminé." });
+                const statut = (emp.statut || '').trim().toLowerCase();
+                // On vérifie si le statut contient "Sortie"
+                if (statut.includes('sortie')) {
+                    console.warn(`⛔ Accès bloqué (Compte Révoqué) : ${user.nom_complet}`);
+                    return res.json({ 
+                        status: "revoked", // On change le statut ici
+                        message: "Accès révoqué. Votre contrat est marqué comme terminé. Veuillez contacter la direction ou les RH." 
+                    });
                 }
             }
 
@@ -258,10 +261,9 @@ app.all('/api/:action', upload.any(), async (req, res) => {
                 emp_id: emp ? emp.id : null, 
                 role: userRole,
                 permissions: perms || {},
-                // On ajoute le path et le scope pour les filtres managers
                 hierarchy_path: emp ? emp.hierarchy_path : null,
                 management_scope: emp ? emp.management_scope : []
-            }, JWT_SECRET, { expiresIn: '8h' }); // Expire dans 8h
+            }, JWT_SECRET, { expiresIn: '8h' });
 
             return res.json({
                 status: "success",
@@ -270,11 +272,10 @@ app.all('/api/:action', upload.any(), async (req, res) => {
                 nom: user.nom_complet,
                 role: userRole,
                 photo: emp ? emp.photo_url : null,
-                employee_type: emp ? emp.employee_type : 'OFFICE', // Important pour le frontend
+                employee_type: emp ? emp.employee_type : 'OFFICE',
                 permissions: perms || {}
             });
         }
-
 
 
         else if (action === 'delete-visit-report') {
@@ -4067,6 +4068,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
