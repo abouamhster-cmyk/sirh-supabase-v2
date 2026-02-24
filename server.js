@@ -2035,6 +2035,20 @@ else if (action === 'list-roles') {
                 const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', id).single();
                 const isMobileAgent = (emp && emp.employee_type === 'MOBILE');
 
+                               // --- LE VERROU DE SÉCURITÉ (NOUVEAU & CRUCIAL) ---
+                // On cherche si un pointage marqué "FINAL" existe déjà pour cet employé aujourd'hui
+                const { data: finalRecord } = await supabase.from('pointages')
+                    .select('id')
+                    .eq('employee_id', id)
+                    .eq('is_final_out', true)
+                    .gte('heure', `${today}T00:00:00`)
+                    .maybeSingle();
+
+                if (finalRecord) {
+                    return res.status(403).json({ error: "Votre journée est déjà clôturée. Plus aucun pointage possible avant demain." });
+                }
+                // ------------------------------------------------
+
                 // --- 1. SÉCURITÉ FIXES (BUREAU) ---
                 // S'ils ne sont pas mobiles : 1 seule entrée et 1 seule sortie autorisées.
                 if (!isMobileAgent) {
@@ -3521,74 +3535,95 @@ else if (action === 'read-modules') {
         }
 
         
- 
-// ============================================================
+ // ============================================================
         // VÉRIFIER L'ÉTAT DU BOUTON (VÉRIF UNIVERSELLE DU FINAL_OUT) ✅
         // ============================================================
-        else if (action === 'get-clock-status') {
+else if (action === 'get-clock-status') {
             const { employee_id } = req.query;
             const now = new Date();
             const todayStr = now.toISOString().split('T')[0];
+            const currentHour = now.getHours(); // Récupère l'heure (0-23)
 
-            // 1. Récupérer le type d'employé
-            const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
-            const isMobile = (emp && emp.employee_type === 'MOBILE');
+            try {
+                // 1. Récupérer l'employé et son type
+                const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
+                if (!emp) return res.status(404).json({ error: "Employé non trouvé" });
+                
+                const isGuard = (emp.employee_type === 'FIXED'); // FIXED = Agent Site / Gardien
+                const isStandard = (emp.employee_type === 'OFFICE' || emp.employee_type === 'MOBILE');
 
-            // 2. Récupérer le DERNIER pointage
-            const { data: lastRecord } = await supabase
-                .from('pointages')
-                .select('action, heure, is_final_out')
-                .eq('employee_id', employee_id)
-                .order('heure', { ascending: false })
-                .limit(1)
-                .maybeSingle();
+                // 2. VÉRIFICATION : Clôture manuelle aujourd'hui ?
+                const { data: finalToday } = await supabase
+                    .from('pointages')
+                    .select('id')
+                    .eq('employee_id', employee_id)
+                    .eq('is_final_out', true)
+                    .gte('heure', `${todayStr}T00:00:00`)
+                    .maybeSingle();
 
-            let status = 'OUT';
-            let isDayFinished = false;
+                if (finalToday) {
+                    return res.json({ status: 'DONE', day_finished: true });
+                }
 
-            if (lastRecord) {
-                const lastTime = new Date(lastRecord.heure);
-                const diffHours = (now - lastTime) / (1000 * 60 * 60);
+                // 3. LOGIQUE DE CLÔTURE AUTOMATIQUE (Oublis de fin de journée)
+                // Si on est après 20h et que ce n'est PAS un gardien
+                if (isStandard && currentHour >= 20) {
+                    return res.json({ status: 'DONE', day_finished: true, message: "Système clôturé à 20h" });
+                }
 
-                if (lastRecord.action === 'CLOCK_IN') {
-                    // --- CAS ENTRÉE EN COURS ---
-                    if (diffHours < 14) {
-                        status = 'IN';
-                    } else {
-                        status = 'OUT'; // Reset automatique après 14h d'oubli
-                    }
-                } 
-                else if (lastRecord.action === 'CLOCK_OUT') {
-                    // --- RÈGLE UNIVERSELLE : SORTIE FINALE (Priorité n°1) ---
-                    // Si le champ is_final_out est vrai, peu importe le type (Admin, Mobile, Bureau)
-                    if (lastRecord.is_final_out === true || lastRecord.is_final_out === 'true') {
-                        if (diffHours < 12) {
+                // 4. RÉCUPÉRER LE DERNIER POINTAGE
+                const { data: lastRecord } = await supabase
+                    .from('pointages')
+                    .select('action, heure')
+                    .eq('employee_id', employee_id)
+                    .order('heure', { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
+
+                let status = 'OUT';
+                let isDayFinished = false;
+
+                if (lastRecord) {
+                    const lastTime = new Date(lastRecord.heure);
+                    const diffHours = (now - lastTime) / (1000 * 60 * 60);
+
+                    if (lastRecord.action === 'CLOCK_IN') {
+                        // SI C'EST UN GARDIEN (FIXED) : On autorise jusqu'à 18h de présence (même après minuit)
+                        if (isGuard) {
+                            if (diffHours < 18) status = 'IN';
+                        } 
+                        // SI C'EST UN STANDARD : On n'autorise la sortie que si l'entrée est d'AUJOURD'HUI
+                        else {
+                            if (lastTime.toISOString().split('T')[0] === todayStr && diffHours < 14) {
+                                status = 'IN';
+                            } else {
+                                // Oubli de sortie hier -> On reset pour aujourd'hui
+                                status = 'OUT';
+                            }
+                        }
+                    } 
+                    else if (lastRecord.action === 'CLOCK_OUT') {
+                        // Pour les standards : si déjà sorti aujourd'hui, c'est fini.
+                        if (isStandard && lastTime.toISOString().split('T')[0] === todayStr) {
                             status = 'DONE';
                             isDayFinished = true;
                         } else {
-                            status = 'OUT'; // Après 12h, on permet de recommencer une journée
+                            status = 'OUT';
                         }
                     }
-                    // --- RÈGLE BUREAU (Auto-clôture au changement de jour) ---
-                    else if (!isMobile && lastTime.toISOString().split('T')[0] === todayStr) {
-                        status = 'DONE';
-                        isDayFinished = true;
-                    }
-                    else {
-                        // Cas Mobile : Sortie de pharmacie "normale", on peut re-pointer Entrée
-                        status = 'OUT';
-                    }
                 }
+
+                return res.json({ 
+                    status: status, 
+                    employee_type: emp.employee_type,
+                    day_finished: isDayFinished
+                });
+
+            } catch (err) {
+                console.error("Erreur status:", err.message);
+                return res.status(500).json({ error: err.message });
             }
-
-            return res.json({ 
-                status: status, 
-                employee_type: emp ? emp.employee_type : 'OFFICE',
-                day_finished: isDayFinished
-            });
         }
-
-
             
         
    
@@ -4032,6 +4067,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
