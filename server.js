@@ -3151,32 +3151,42 @@ const htmlSlip = `
         // GESTION DES PLANNINIGS D'EMPLOYÉS MOBILES ✅
         // ============================================================
 
-        // A. Ajouter un planning (Auto-planification Délégué OU Assignation Manager)
+       // A. Ajouter un planning (Auto-planification Délégué OU Assignation Manager)
         else if (action === 'add-schedule') {
-            // Tout le monde peut planifier (Délégué pour lui-même, Chef pour les autres)
             
             const { employee_id, location_id, schedule_date, start_time, end_time, notes, prescripteur_id } = req.body;
             
-            // SÉCURITÉ : Si je suis un simple employé, je ne peux planifier QUE pour moi-même
-            if (!req.user.permissions.can_see_employees && String(employee_id) !== String(req.user.emp_id)) {
-                return res.status(403).json({ error: "Vous ne pouvez planifier que pour vous-même." });
+            // 1. VÉRIFICATION DES DROITS
+            // On a besoin soit d'être Manager (can_see_employees), soit d'avoir le droit planning (can_manage_schedules)
+            const isManager = req.user.permissions && req.user.permissions.can_see_employees;
+            const canSelfPlan = req.user.permissions && req.user.permissions.can_manage_schedules;
+
+            if (!isManager && !canSelfPlan) {
+                return res.status(403).json({ error: "Vous n'avez pas le droit de créer des missions." });
             }
 
+            // 2. RESTRICTION DE SÉCURITÉ
+            // Si je ne suis PAS manager, je suis OBLIGÉ de créer la mission pour MOI-MÊME (mon ID).
+            // Je ne peux pas créer une mission pour un collègue.
+            if (!isManager && String(employee_id) !== String(req.user.emp_id)) {
+                return res.status(403).json({ error: "Interdit : Vous ne pouvez planifier que pour vous-même." });
+            }
+
+            // 3. INSERTION
             const { data, error } = await supabase.from('employee_schedules').insert([{
                 employee_id, 
                 location_id: location_id || null, 
-                prescripteur_id: prescripteur_id || null, // <--- NOUVEAU
+                prescripteur_id: prescripteur_id || null, 
                 schedule_date, 
                 start_time, 
                 end_time, 
                 notes,
-                status: 'PENDING' // Statut par défaut : En attente
+                status: 'PENDING' // Statut par défaut : En attente (Gris)
             }]).select();
 
             if (error) throw error;
             return res.json({ status: "success", data: data[0] });
         }
-
         // B. Lister les plannings (avec détails de l'employé et du lieu)
     // B. Lister les plannings (CORRIGÉ POUR AUTORISER LES DÉLÉGUÉS)
         else if (action === 'list-schedules') {
@@ -4073,6 +4083,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
