@@ -1693,8 +1693,9 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
             if (req.files && req.files.length > 0) {
                 const file = req.files[0];
                 if (file) {
-                    const fileName = `${doc_type}_${targetId}_${Date.now()}`;
-                    
+                // Nomenclature : UPDATE_CV_ID45_TIMESTAMP.pdf
+                const fileExt = file.originalname.split('.').pop();
+                const fileName = `UPDATE_${doc_type.toUpperCase()}_ID${targetId}_${Date.now()}.${fileExt}`;                    
                     // Upload vers Supabase Storage
                     const { error: storageErr } = await supabase.storage
                         .from('documents')
@@ -2028,7 +2029,7 @@ else if (action === 'list-roles') {
             if (req.files && req.files.length > 0) {
                 const file = req.files.find(f => f.fieldname === 'proof_photo');
                 if (file) {
-                    const fileName = `visite_proof_${id}_${Date.now()}.jpg`;
+                    const fileName = `VISITE_ID${id}_${new Date().toISOString().split('T')[0]}_${Date.now()}.jpg`;                    
                     const { error: upErr } = await supabase.storage.from('documents').upload(fileName, file.buffer, { contentType: file.mimetype });
                     if (!upErr) proofUrl = supabase.storage.from('documents').getPublicUrl(fileName).data.publicUrl;
                 }
@@ -2629,7 +2630,8 @@ else if (action === 'write') {
     // --- A. GESTION DES FICHIERS (Multer) --- (CE BLOC RESTE INCHANGÉ)
     if (req.files && req.files.length > 0) {
         for (const file of req.files) {
-            const fileName = `${Date.now()}_${file.originalname.replace(/\s/g, '_')}`;
+            const fileExt = file.originalname.split('.').pop();
+            const fileName = `DOC_${file.fieldname.toUpperCase()}_${body.nom.replace(/\s/g, '_')}_${Date.now()}.${fileExt}`;
             const { error } = await supabase.storage.from('documents').upload(fileName, file.buffer, { contentType: file.mimetype });
             if (!error) {
                 const { data } = supabase.storage.from('documents').getPublicUrl(fileName);
@@ -4041,105 +4043,60 @@ else if (action === 'get-dashboard-stats') {
             }
         }
 
-// ============================================================
-// JOB D'ARCHIVAGE AUTOMATIQUE (Maintenance Long Terme)
-// ============================================================
+
+
+
+
 else if (action === 'run-archiving-job') {
-    if (!checkPerm(req, 'can_manage_config')) return res.status(403).json({ error: "Interdit : Droits de maintenance requis." });
-    const results = { logs: 0, visits: 0, photos_deleted: 0, employees: 0 };
+    if (!checkPerm(req, 'can_manage_config')) return res.status(403).json({ error: "Droits requis." });
+    const results = { logs_archived: 0, photos_deleted: 0 };
     
     try {
-        // --- 1. ARCHIVAGE DES LOGS (> 1 AN) ---
-        // On déplace les vieux logs vers la table archives.logs
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        // 1. PURGE DES PHOTOS DE VISITE (> 2 ANS)
+        const twoYearsAgo = new Date();
+        twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
 
-        // A. Copie vers archive
-        const { data: oldLogs } = await supabase
-            .from('logs')
-            .select('*')
-            .lt('created_at', oneYearAgo.toISOString());
-
-        if (oldLogs && oldLogs.length > 0) {
-            await supabase.from('logs', { schema: 'archives' }).insert(oldLogs);
-            // B. Suppression de la table active
-            const { count } = await supabase
-                .from('logs')
-                .delete({ count: 'exact' })
-                .lt('created_at', oneYearAgo.toISOString());
-            results.logs = count;
-        }
-
-        // --- 2. NETTOYAGE DES PHOTOS DE VISITE (> 1 AN) ---
-        // Les preuves de visite (cachets) ne sont utiles que pour le paiement des primes
-        // Après 1 an, on garde la ligne SQL (preuve texte) mais on supprime la photo pour sauver le stockage
-        const { data: oldVisits } = await supabase
+        const { data: toDelete } = await supabase
             .from('visit_reports')
             .select('id, proof_url')
-            .lt('check_in_time', oneYearAgo.toISOString())
+            .lt('check_in_time', twoYearsAgo.toISOString())
             .not('proof_url', 'is', null);
 
-        if (oldVisits && oldVisits.length > 0) {
-            const filesToDelete = [];
-            const idsToClean = [];
-
-            oldVisits.forEach(v => {
-                if (v.proof_url) {
-                    // Extraction du chemin du fichier depuis l'URL Supabase
-                    const path = v.proof_url.split('/documents/')[1]; 
-                    if (path) filesToDelete.push(path);
-                }
-                idsToClean.push(v.id);
-            });
-
-            if (filesToDelete.length > 0) {
-                // Suppression physique des fichiers
-                await supabase.storage.from('documents').remove(filesToDelete);
-                // Suppression du lien dans la base (on met NULL)
-                await supabase.from('visit_reports').update({ proof_url: null }).in('id', idsToClean);
-                results.photos_deleted = filesToDelete.length;
+        if (toDelete && toDelete.length > 0) {
+            const filePaths = toDelete.map(v => v.proof_url.split('/documents/')[1]).filter(p => p);
+            
+            // Suppression physique sur le Storage
+            const { error: storageErr } = await supabase.storage.from('documents').remove(filePaths);
+            
+            if (!storageErr) {
+                // Mise à jour de la DB pour nettoyer les liens morts
+                const ids = toDelete.map(v => v.id);
+                await supabase.from('visit_reports').update({ proof_url: null }).in('id', ids);
+                results.photos_deleted = filePaths.length;
             }
         }
 
-        // --- 3. ARCHIVAGE EMPLOYÉS "SORTIE" (> 6 MOIS) ---
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        // 2. ARCHIVAGE DES LOGS (> 1 AN) vers le schéma archives
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        const { data: oldLogs } = await supabase.from('logs').select('*').lt('created_at', oneYearAgo.toISOString());
 
-        // On cherche les employés marqués "Sortie" dont la modif date de plus de 6 mois
-        // Note: Cela suppose que tu as une colonne 'updated_at' ou qu'on se base sur une logique métier
-        // Ici, on va se baser sur ceux qui n'ont pas pointé depuis 6 mois ET qui sont 'Sortie'
-        
-        const { data: exitedEmployees } = await supabase
-            .from('employees')
-            .select('*')
-            .eq('statut', 'Sortie'); // On filtre d'abord ceux qui sont Sortis
-
-        // On filtre manuellement ceux partis depuis longtemps (si on n'a pas de date de sortie précise)
-        // Pour être sûr, on archive ceux qui sont "Sortie"
-        
-        if (exitedEmployees && exitedEmployees.length > 0) {
-             // A. Copie vers archives.employees
-             const { error: arcErr } = await supabase.from('employees', { schema: 'archives' }).insert(exitedEmployees);
-             
-             if (!arcErr) {
-                 const idsToDelete = exitedEmployees.map(e => e.id);
-                 
-                 // B. Suppression de la table active (CASCADE va nettoyer les liens si configuré, sinon attention)
-                 // Pour la sécurité, on supprime d'abord l'utilisateur de l'app (app_users) si on veut bloquer l'accès
-                 // Ici on supprime juste de la table employees pour alléger la liste
-                 await supabase.from('employees').delete().in('id', idsToDelete);
-                 results.employees = idsToDelete.length;
-             }
+        if (oldLogs && oldLogs.length > 0) {
+            const { error: arcErr } = await supabase.from('logs', { schema: 'archives' }).insert(oldLogs);
+            if (!arcErr) {
+                await supabase.from('logs').delete().lt('created_at', oneYearAgo.toISOString());
+                results.logs_archived = oldLogs.length;
+            }
         }
 
         return res.json({ status: "success", report: results });
-
     } catch (err) {
-        console.error("Job Archivage:", err);
         return res.status(500).json({ error: err.message });
     }
 }
 
+
+                
 
     // Dans ton bloc "else if" central (router)
 else if (action === 'list-departments') {
@@ -4165,6 +4122,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
