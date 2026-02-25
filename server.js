@@ -2422,19 +2422,53 @@ else if (action === 'check-returns') {
 
 
 // --- AJOUTER UN PRODUIT ---
-else if (action === 'add-product') {
-if (!checkPerm(req, 'can_manage_catalog')) return res.status(403).json({ error: "Droits de gestion catalogue requis." });
+// --- AJOUTER OU MODIFIER UN PRODUIT (MULTI-PHOTOS) ---
+else if (action === 'save-product') {
+    if (!checkPerm(req, 'can_manage_config')) return res.status(403).json({ error: "Accès refusé." });
     
-    const { name, description } = req.body;
-    let photoUrl = null;
-    if (req.files && req.files.length > 0) {
-        const file = req.files[0];
-        const fileName = `prod_${Date.now()}.jpg`;
-        const { error } = await supabase.storage.from('documents').upload(fileName, file.buffer);
-        if (!error) photoUrl = supabase.storage.from('documents').getPublicUrl(fileName).data.publicUrl;
+    const { id, name, description } = req.body;
+    let finalUrls = [];
+
+    // 1. Si c'est une modification, on récupère d'abord les photos déjà existantes en base
+    if (id && id !== "null" && id !== "") {
+        const { data: current } = await supabase.from('products').select('photo_urls').eq('id', id).single();
+        if (current && current.photo_urls) {
+            finalUrls = Array.isArray(current.photo_urls) ? current.photo_urls : [];
+        }
     }
-    const { error } = await supabase.from('products').insert([{ name, description, photo_url: photoUrl }]);
-    if (error) throw error;
+
+    // 2. On traite les nouveaux fichiers envoyés (s'il y en a)
+    if (req.files && req.files.length > 0) {
+        for (const file of req.files) {
+            const fileName = `prod_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
+            const { error: upErr } = await supabase.storage
+                .from('documents')
+                .upload(fileName, file.buffer, { contentType: file.mimetype });
+            
+            if (!upErr) {
+                const { data } = supabase.storage.from('documents').getPublicUrl(fileName);
+                finalUrls.push(data.publicUrl); // On ajoute le nouveau lien au tableau
+            }
+        }
+    }
+
+    const payload = { 
+        name: name, 
+        description: description, 
+        photo_urls: finalUrls, // Tableau JSON
+        is_active: true 
+    };
+
+    let result;
+    if (id && id !== "null" && id !== "") {
+        // C'est une mise à jour
+        result = await supabase.from('products').update(payload).eq('id', id);
+    } else {
+        // C'est une nouvelle création
+        result = await supabase.from('products').insert([payload]);
+    }
+
+    if (result.error) throw result.error;
     return res.json({ status: "success" });
 }
 
@@ -2548,11 +2582,11 @@ else if (action === 'import-prescripteurs') {
     return res.json({ status: "success", count: prescripteurs.length });
 }
     
-    // --- LISTER LES PRODUITS ---
+// --- LISTER LES PRODUITS (AVEC MULTI-PHOTOS) ---
     else if (action === 'list-products') {
     const { data, error } = await supabase
         .from('products')
-        .select('id, name, description, photo_url') // Idem, pas de metadata inutile
+        .select('id, name, description, photo_urls') // On demande le tableau JSON
         .eq('is_active', true)
         .order('name');    
         if (error) throw error;
@@ -2561,6 +2595,7 @@ else if (action === 'import-prescripteurs') {
 
 // --- SUPPRIMER UN PRODUIT (Désactivation) ---
 else if (action === 'delete-product') {
+    if (!checkPerm(req, 'can_manage_config')) return res.status(403).json({ error: "Accès refusé." });
     const { id } = req.body;
     const { error } = await supabase.from('products').update({ is_active: false }).eq('id', id);
     if (error) throw error;
@@ -4130,6 +4165,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
