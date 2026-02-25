@@ -15,6 +15,8 @@ const libre = require('libreoffice-convert');
 const { promisify } = require('util');
 const convertAsync = promisify(libre.convert);
 const axios = require('axios');
+const pLimit = require('p-limit');
+const pdfLimiter = pLimit(1);
 const SIGNATURE_PLACEHOLDER = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASwAAABAAQMAAAB6pZ9hAAAABlBMVEX///9BQUFE6v9pAAAAAXRSTlMAQObYZgAAADxJREFUeF7t0CERAAAIAzH86Bv7m8MEpInZ7mYpSUn6pCTpSUnSk5KkJyVJT0qSnpQkPSlJelKS9KQk6UmfBy68B9Vv999FAAAAAElFTkSuQmCC"; 
 // Note : Tu peux créer ta propre petite image PNG "ZONE DE SIGNATURE" et la convertir en base64 si tu préfères un design spécifique.
 
@@ -424,10 +426,9 @@ else if (action === 'read') {
 
             // CORRECTION : On retire la vérification de permission 'can_manage_config'.
             // Tout utilisateur connecté doit pouvoir connaître les zones pour calculer sa distance.
-            
             const { data, error } = await supabase
                 .from('zones')
-                .select('*')
+                .select('nom, latitude, longitude, rayon') // On ne prend que le strict nécessaire
                 .eq('actif', true);
 
             if (error) throw error;
@@ -1021,8 +1022,7 @@ else if (action === 'contract-gen') {
 
         // 4. CONVERSION EN PDF POUR LA VUE
         console.log("🔄 Conversion du brouillon en PDF...");
-        const pdfBuffer = await convertAsync(docxBuffer, '.pdf', undefined);
-
+        const pdfBuffer = await pdfLimiter(() => convertAsync(docxBuffer, '.pdf', undefined));
         // 5. ENVOI DU PDF AU NAVIGATEUR
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', 'inline; filename=Brouillon_Contrat.pdf');
@@ -1171,8 +1171,7 @@ else if (action === 'contract-gen') {
                     const docxBuffer = doc.getZip().generate({ type: 'nodebuffer', compression: 'DEFLATE' });
                     
                     console.log("🔄 Lancement de la conversion LibreOffice...");
-                    const pdfBuffer = await convertAsync(docxBuffer, '.pdf', undefined);
-
+                    const pdfBuffer = await pdfLimiter(() => convertAsync(docxBuffer, '.pdf', undefined));
                     // 6. Upload du PDF final
                     const pdfFileName = `contrat_signe_${id}_${Date.now()}.pdf`;
                     const { error: upErr } = await supabase.storage
@@ -2526,13 +2525,19 @@ else if (action === 'list-prescripteurs') {
         return res.status(500).json({ error: err.message });
     }
 }
+
+
     
-// --- LISTER LES PRODUITS ---
-else if (action === 'list-products') {
-    const { data, error } = await supabase.from('products').select('*').eq('is_active', true).order('name');
-    if (error) throw error;
-    return res.json(data);
-}
+    // --- LISTER LES PRODUITS ---
+    else if (action === 'list-products') {
+    const { data, error } = await supabase
+        .from('products')
+        .select('id, name, description, photo_url') // Idem, pas de metadata inutile
+        .eq('is_active', true)
+        .order('name');    
+        if (error) throw error;
+        return res.json(data);
+    }
 
 // --- SUPPRIMER UN PRODUIT (Désactivation) ---
 else if (action === 'delete-product') {
@@ -2689,7 +2694,7 @@ else if (action === 'write') {
             // On récupère uniquement les messages non expirés
             const { data, error } = await supabase
                 .from('flash_messages')
-                .select('*')
+                .select('id, message, sender, type, created_at')
                 .gt('date_expiration', now)
                 .order('created_at', { ascending: false });
 
@@ -3004,7 +3009,7 @@ const htmlSlip = `
             const htmlBuffer = Buffer.from(htmlSlip, 'utf-8');
             
             console.log("🔄 Conversion PDF Vectoriel pour :", record.nom);
-            const pdfBuffer = await convertAsync(htmlBuffer, '.pdf', undefined);
+            const pdfBuffer = await pdfLimiter(() => convertAsync(htmlBuffer, '.pdf', undefined));
 
             const fileName = `bulletin_${record.id}_${Date.now()}.pdf`;
             
@@ -4116,6 +4121,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
