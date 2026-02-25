@@ -417,7 +417,57 @@ else if (action === 'read') {
 
 
 
+// --- LECTURE COMPTABILITÉ : TOUS LES EMPLOYÉS DU PÉRIMÈTRE (SANS LIMITE) ---
+else if (action === 'read-payroll-full') {
+    // SÉCURITÉ 1 : On vérifie que l'utilisateur a le droit "Paie"
+    if (!checkPerm(req, 'can_see_payroll')) {
+        return res.status(403).json({ error: "Accès refusé à la comptabilité" });
+    }
 
+    try {
+        const currentUserId = req.user.emp_id;
+        const { data: requester } = await supabase.from('employees')
+            .select('hierarchy_path, management_scope')
+            .eq('id', currentUserId).single();
+
+        // On ne prend que le strict nécessaire pour le calcul des salaires (Performance)
+        let columns = "id, nom, matricule, poste, departement, statut, salaire_brut_fixe, indemnite_transport, indemnite_logement, role, hierarchy_path, employee_type";
+        let query = supabase.from('employees').select(columns);
+
+        // SÉCURITÉ 2 : Respect du périmètre (Comme pour la route read)
+        if (checkPerm(req, 'can_see_employees')) {
+            // Voit tout (Admin/RH)
+        }
+        else if (req.user.role === 'MANAGER' && requester) {
+            let conditions = [];
+            conditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
+            conditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
+            if (requester.management_scope?.length > 0) {
+                const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
+                conditions.push(`departement.in.${scopeList}`);
+            }
+            query = query.or(conditions.join(','));
+        } else {
+            query = query.eq('id', currentUserId);
+        }
+
+        // Filtres dynamiques (venant de tes menus déroulants Compta)
+        const { status, type, dept, role } = req.query;
+        if (status && status !== 'all') query = query.eq('statut', status);
+        if (type && type !== 'all') query = query.eq('employee_type', type);
+        if (dept && dept !== 'all') query = query.eq('departement', dept);
+        if (role && role !== 'all') query = query.eq('role', role);
+
+        // 🚀 EXÉCUTION SANS .range() -> Récupère tout d'un coup
+        const { data, error } = await query.order('nom', { ascending: true });
+
+        if (error) throw error;
+        return res.json(data); // On renvoie le tableau directement
+
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+}
 
                 
 
@@ -3903,97 +3953,122 @@ else if (action === 'import-zones') {
     }
     return res.json({ status: "success", count: zones.length });
 }
+
+
+    
 // --- ROUTE : STATISTIQUES GLOBALES (POUR DASHBOARD & GRAPHIQUES) ---
-
-
-
-
-
 else if (action === 'get-dashboard-stats') {
 
-            if (!checkPerm(req, 'can_see_dashboard')) {
-                return res.status(403).json({ error: "Accès interdit aux statistiques" });
-            }
-            
-            try {
-                const today = new Date().toISOString().split('T')[0];
-                const currentUserId = req.user.emp_id;
+    if (!checkPerm(req, 'can_see_dashboard')) {
+        return res.status(403).json({ error: "Accès interdit aux statistiques" });
+    }
+    
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const currentUserId = req.user.emp_id;
 
-                // --- 1. RÉCUPÉRATION DU PÉRIMÈTRE ---
-                const { data: requester } = await supabase.from('employees')
-                    .select('hierarchy_path, management_scope')
-                    .eq('id', currentUserId)
-                    .single();
+        // Calcul de la date d'alerte pour les contrats (Aujourd'hui + 15 jours)
+        const dateAlerteArr = new Date();
+        dateAlerteArr.setDate(dateAlerteArr.getDate() + 15);
+        const alertLimitStr = dateAlerteArr.toISOString().split('T')[0];
 
-                let query = supabase.from('employees').select('id, statut, departement, hierarchy_path');
+        // --- 1. RÉCUPÉRATION DU PÉRIMÈTRE ---
+        const { data: requester } = await supabase.from('employees')
+            .select('hierarchy_path, management_scope')
+            .eq('id', currentUserId)
+            .single();
 
-                // --- 2. FILTRE DE SÉCURITÉ ---
-                if (!checkPerm(req, 'can_see_employees')) {
-                    if (req.user.role === 'MANAGER' && requester) {
-                        let conditions = [];
-                        conditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
-                        conditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
-                        
-                        if (requester.management_scope?.length > 0) {
-                            const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
-                            conditions.push(`departement.in.${scopeList}`);
-                        }
-                        query = query.or(conditions.join(','));
-                    } else {
-                        query = query.eq('id', currentUserId);
-                    }
-                }
+        let query = supabase.from('employees').select('id, statut, departement, hierarchy_path, date_fin_contrat');
 
-                const { data: employees, error: errEmp } = await query;
-                if (errEmp) throw errEmp;
-
-                // --- 3. GESTION DES CONGÉS ---
-                const allowedIds = employees.map(e => e.id);
+        // --- 2. FILTRE DE SÉCURITÉ ---
+        if (!checkPerm(req, 'can_see_employees')) {
+            if (req.user.role === 'MANAGER' && requester) {
+                let conditions = [];
+                conditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
+                conditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
                 
-                const { data: activeLeaves } = await supabase
-                    .from('conges')
-                    .select('employee_id')
-                    .eq('statut', 'Validé')
-                    .lte('date_debut', today)
-                    .gte('date_fin', today)
-                    .in('employee_id', allowedIds);
-
-                const idsEnCongePlanifie = new Set((activeLeaves || []).map(l => l.employee_id));
-
-                // --- 4. CALCUL DES STATISTIQUES ---
-                const stats = {
-                    total: employees.length,
-                    actifs: 0,
-                    sortis: 0,
-                    enConge: 0,
-                    depts: {}
-                };
-
-                employees.forEach(emp => {
-                    const s = (emp.statut || 'Actif').toLowerCase().trim();
-                    
-                    if (s === 'sortie') {
-                        stats.sortis++;
-                    } 
-                    else if (s.includes('cong') || idsEnCongePlanifie.has(emp.id)) {
-                        stats.enConge++;
-                    } 
-                    else {
-                        // ICI : "Actif", "En Poste", "Mission"... tout ça compte comme ACTIF
-                        stats.actifs++;
-                    }
-
-                    const d = emp.departement || 'Non défini';
-                    stats.depts[d] = (stats.depts[d] || 0) + 1;
-                });
-
-                return res.json(stats);
-
-            } catch (err) {
-                console.error("Erreur stats filtrées:", err.message);
-                return res.status(500).json({ error: err.message });
+                if (requester.management_scope?.length > 0) {
+                    const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
+                    conditions.push(`departement.in.${scopeList}`);
+                }
+                query = query.or(conditions.join(','));
+            } else {
+                query = query.eq('id', currentUserId);
             }
         }
+
+        const { data: employeesList, error: errEmp } = await query;
+        if (errEmp) throw errEmp;
+
+        // --- 3. GESTION DES CONGÉS ACTIFS ---
+        const allowedIds = employeesList.map(e => e.id);
+        
+        const { data: activeLeaves } = await supabase
+            .from('conges')
+            .select('employee_id')
+            .eq('statut', 'Validé')
+            .lte('date_debut', today)
+            .gte('date_fin', today)
+            .in('employee_id', allowedIds);
+
+        const idsEnCongePlanifie = new Set((activeLeaves || []).map(l => l.employee_id));
+
+        // --- 4. NOUVEAU : COMPTEURS GLOBAUX POUR LES SIGNAUX ---
+        
+        // A. Compter les congés en attente dans tout le périmètre
+        const { count: pendingCount } = await supabase
+            .from('conges')
+            .select('*', { count: 'exact', head: true })
+            .in('employee_id', allowedIds)
+            .eq('statut', 'En attente');
+
+        // B. Compter les contrats finissant dans les 15 jours dans tout le périmètre
+        // On filtre manuellement sur la liste déjà récupérée pour économiser une requête
+        const contractAlerts = employeesList.filter(e => 
+            e.date_fin_contrat && 
+            e.date_fin_contrat >= today && 
+            e.date_fin_contrat <= alertLimitStr &&
+            !e.statut.toLowerCase().includes('sortie')
+        ).length;
+
+        // --- 5. CALCUL DES STATISTIQUES (Basé sur la liste complète autorisée) ---
+        const stats = {
+            total: employeesList.length,
+            actifs: 0,
+            sortis: 0,
+            enConge: 0,
+            depts: {},
+            // Ajout des données pour les signaux
+            alertConges: pendingCount || 0,
+            alertContrats: contractAlerts || 0
+        };
+
+        employeesList.forEach(emp => {
+            const s = (emp.statut || 'Actif').toLowerCase().trim();
+            
+            if (s === 'sortie') {
+                stats.sortis++;
+            } 
+            else if (s.includes('cong') || idsEnCongePlanifie.has(emp.id)) {
+                stats.enConge++;
+            } 
+            else {
+                stats.actifs++;
+            }
+
+            const d = emp.departement || 'Non défini';
+            stats.depts[d] = (stats.depts[d] || 0) + 1;
+        });
+
+        return res.json(stats);
+
+    } catch (err) {
+        console.error("Erreur stats filtrées:", err.message);
+        return res.status(500).json({ error: err.message });
+    }
+}
+
+
 
 
 
@@ -4122,6 +4197,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
