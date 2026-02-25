@@ -418,10 +418,10 @@ else if (action === 'read') {
 
 
 // --- LECTURE COMPTABILITÉ : TOUS LES EMPLOYÉS DU PÉRIMÈTRE (SANS LIMITE) ---
+// --- LECTURE COMPTABILITÉ HARMONISÉE ---
 else if (action === 'read-payroll-full') {
-    // SÉCURITÉ 1 : On vérifie que l'utilisateur a le droit "Paie"
     if (!checkPerm(req, 'can_see_payroll')) {
-        return res.status(403).json({ error: "Accès refusé à la comptabilité" });
+        return res.status(403).json({ error: "Accès refusé" });
     }
 
     try {
@@ -430,15 +430,13 @@ else if (action === 'read-payroll-full') {
             .select('hierarchy_path, management_scope')
             .eq('id', currentUserId).single();
 
-        // On ne prend que le strict nécessaire pour le calcul des salaires (Performance)
         let columns = "id, nom, matricule, poste, departement, statut, salaire_brut_fixe, indemnite_transport, indemnite_logement, role, hierarchy_path, employee_type";
         let query = supabase.from('employees').select(columns);
 
-        // SÉCURITÉ 2 : Respect du périmètre (Comme pour la route read)
+        // 1. SÉCURITÉ : Même logique de périmètre que la route 'read'
         if (checkPerm(req, 'can_see_employees')) {
-            // Voit tout (Admin/RH)
-        }
-        else if (req.user.role === 'MANAGER' && requester) {
+            // Admin voit tout
+        } else if (req.user.role === 'MANAGER' && requester) {
             let conditions = [];
             conditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
             conditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
@@ -451,18 +449,26 @@ else if (action === 'read-payroll-full') {
             query = query.eq('id', currentUserId);
         }
 
-        // Filtres dynamiques (venant de tes menus déroulants Compta)
+        // 2. FILTRE DE STATUT INTELLIGENT (C'est ici que ça se règle)
         const { status, type, dept, role } = req.query;
-        if (status && status !== 'all') query = query.eq('statut', status);
+        
+        if (status && status !== 'all') {
+            // On utilise la même règle : "Actif" inclut aussi "En Poste"
+            if (status === 'Actif') {
+                query = query.in('statut', ['Actif', 'En Poste', 'ACTIF', 'En poste']);
+            } else {
+                query = query.eq('statut', status);
+            }
+        }
+
         if (type && type !== 'all') query = query.eq('employee_type', type);
         if (dept && dept !== 'all') query = query.eq('departement', dept);
         if (role && role !== 'all') query = query.eq('role', role);
 
-        // 🚀 EXÉCUTION SANS .range() -> Récupère tout d'un coup
         const { data, error } = await query.order('nom', { ascending: true });
 
         if (error) throw error;
-        return res.json(data); // On renvoie le tableau directement
+        return res.json(data);
 
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -4197,6 +4203,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
