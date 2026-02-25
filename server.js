@@ -2508,6 +2508,9 @@ if (!checkPerm(req, 'can_manage_catalog')) return res.status(403).json({ error: 
             if (error) throw error;
             return res.json({ status: "success" });
         }
+
+
+
             
     // --- LISTER LES PRESCRIPTEURS OFFICIELS ---
 else if (action === 'list-prescripteurs') {
@@ -2527,6 +2530,23 @@ else if (action === 'list-prescripteurs') {
 }
 
 
+    // --- IMPORT MASSIF DE PRESCRIPTEURS (CSV) ---
+else if (action === 'import-prescripteurs') {
+    if (!checkPerm(req, 'can_manage_prescripteurs')) {
+        return res.status(403).json({ error: "Interdit : Droits insuffisants." });
+    }
+    
+    const { prescripteurs } = req.body;
+    
+    // Insertion massive (Supabase gère très bien ça)
+    const { error } = await supabase.from('prescripteurs').insert(prescripteurs);
+    
+    if (error) {
+        console.error("Erreur Import Prescripteurs:", error.message);
+        throw error;
+    }
+    return res.json({ status: "success", count: prescripteurs.length });
+}
     
     // --- LISTER LES PRODUITS ---
     else if (action === 'list-products') {
@@ -4121,6 +4141,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
