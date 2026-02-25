@@ -3137,40 +3137,29 @@ const htmlSlip = `
 
 
 
-       // B. Lister les lieux (MODE STRICT / AVEUGLE)
+// B. Lister les lieux (CORRECTION : RETRAIT DU FILTRE QUI PLANTAIT)
         else if (action === 'list-mobile-locations') {
             
             const p = req.user.permissions || {};
-            const userId = req.user.emp_id;
-
+            
             // 1. Droit d'entrée de base
             const canView = p.can_manage_config || p.can_see_employees || p.can_manage_schedules || p.can_manage_mobile_locations;
+            
+            // Si l'utilisateur n'a aucun de ces droits, on bloque
             if (!canView) return res.status(403).json({ error: "Accès refusé." });
 
             // 2. Préparation de la requête
+            // ON A RETIRÉ LE FILTRE 'created_by_id' QUI CAUSAIT L'ERREUR 500
             let query = supabase
                 .from('mobile_locations')
                 .select('*')
                 .eq('is_active', true)
                 .order('name', { ascending: true });
 
-            // 3. LE VERROUILLAGE (C'est ici qu'on applique ta demande)
-            const isSuperAdmin = p.can_manage_config || p.can_see_employees;
-
-            if (!isSuperAdmin) {
-                // SI DÉLÉGUÉ :
-                // Il ne voit QUE ce qu'il a créé (created_by_id = userId).
-                // On enlève le "OR created_by_id is null".
-                // Résultat : La "Base Pré-remplie" devient invisible pour lui.
-                query = query.eq('created_by_id', userId);
-            }
-
             const { data, error } = await query;
             if (error) throw error;
             return res.json(data);
         }
-
-
 
             
         // C. Mettre à jour un lieu mobile
@@ -4141,6 +4130,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
