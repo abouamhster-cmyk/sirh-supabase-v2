@@ -4129,52 +4129,109 @@ else if (action === 'get-dashboard-stats') {
 
 
 else if (action === 'run-archiving-job') {
-    if (!checkPerm(req, 'can_manage_config')) return res.status(403).json({ error: "Droits requis." });
-    const results = { logs_archived: 0, photos_deleted: 0 };
-    
-    try {
-        // 1. PURGE DES PHOTOS DE VISITE (> 2 ANS)
-        const twoYearsAgo = new Date();
-        twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+  if (!checkPerm(req, "can_manage_config"))
+    return res.status(403).json({ error: "Droits requis." });
 
-        const { data: toDelete } = await supabase
-            .from('visit_reports')
-            .select('id, proof_url')
-            .lt('check_in_time', twoYearsAgo.toISOString())
-            .not('proof_url', 'is', null);
+  // On initialise les compteurs à 0
+  const results = { logs_archived: 0, photos_deleted: 0, employees: 0 };
 
-        if (toDelete && toDelete.length > 0) {
-            const filePaths = toDelete.map(v => v.proof_url.split('/documents/')[1]).filter(p => p);
-            
-            // Suppression physique sur le Storage
-            const { error: storageErr } = await supabase.storage.from('documents').remove(filePaths);
-            
-            if (!storageErr) {
-                // Mise à jour de la DB pour nettoyer les liens morts
-                const ids = toDelete.map(v => v.id);
-                await supabase.from('visit_reports').update({ proof_url: null }).in('id', ids);
-                results.photos_deleted = filePaths.length;
-            }
-        }
+  try {
+    // 1. PURGE DES PHOTOS DE VISITE (> 2 ANS)
+    const twoYearsAgo = new Date();
+    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
 
-        // 2. ARCHIVAGE DES LOGS (> 1 AN) vers le schéma archives
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-        const { data: oldLogs } = await supabase.from('logs').select('*').lt('created_at', oneYearAgo.toISOString());
+    const { data: toDelete } = await supabase
+      .from("visit_reports")
+      .select("id, proof_url")
+      .lt("check_in_time", twoYearsAgo.toISOString())
+      .not("proof_url", "is", null);
 
-        if (oldLogs && oldLogs.length > 0) {
-            const { error: arcErr } = await supabase.from('logs', { schema: 'archives' }).insert(oldLogs);
-            if (!arcErr) {
-                await supabase.from('logs').delete().lt('created_at', oneYearAgo.toISOString());
-                results.logs_archived = oldLogs.length;
-            }
-        }
+    if (toDelete && toDelete.length > 0) {
+      const filePaths = toDelete
+        .map((v) => v.proof_url.split("/documents/")[1])
+        .filter((p) => p);
 
-        return res.json({ status: "success", report: results });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+      // Suppression physique sur le Storage
+      const { error: storageErr } = await supabase.storage
+        .from("documents")
+        .remove(filePaths);
+
+      if (!storageErr) {
+        const ids = toDelete.map((v) => v.id);
+        await supabase
+          .from("visit_reports")
+          .update({ proof_url: null })
+          .in("id", ids);
+        results.photos_deleted = filePaths.length;
+      }
     }
-}
+
+    // 2. ARCHIVAGE DES LOGS (> 1 AN)
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const { data: oldLogs } = await supabase
+      .from("logs")
+      .select("*")
+      .lt("created_at", oneYearAgo.toISOString());
+
+    if (oldLogs && oldLogs.length > 0) {
+      const { error: arcErr } = await supabase
+        .from("logs", { schema: "archives" })
+        .insert(oldLogs);
+      
+      if (!arcErr) {
+        await supabase
+          .from("logs")
+          .delete()
+          .lt("created_at", oneYearAgo.toISOString());
+        results.logs_archived = oldLogs.length;
+      }
+    }
+
+    // ============================================================
+    // 3. ARCHIVAGE DES EMPLOYÉS "SORTIE" (NOUVEAU ✅)
+    // ============================================================
+    // On cherche les employés marqués "Sortie"
+    const { data: exitedEmployees } = await supabase
+      .from("employees")
+      .select("*")
+      .ilike("statut", "%Sortie%"); // Recherche insensible à la casse
+
+    if (exitedEmployees && exitedEmployees.length > 0) {
+      // A. On tente de les insérer dans la table d'archive
+      // ATTENTION : La table "employees" doit exister dans le schéma "archives" de Supabase
+      const { error: empArcErr } = await supabase
+        .from("employees", { schema: "archives" })
+        .insert(exitedEmployees);
+
+      // B. Si la copie a marché, on les supprime de la table principale
+      if (!empArcErr) {
+        const idsToDelete = exitedEmployees.map(e => e.id);
+        
+        await supabase
+          .from("employees")
+          .delete()
+          .in("id", idsToDelete);
+          
+        // On supprime aussi leur accès utilisateur pour être sûr
+        const userIds = exitedEmployees.map(e => e.user_associated_id).filter(id => id);
+        if (userIds.length > 0) {
+            await supabase.from("app_users").delete().in("id", userIds);
+        }
+
+        results.employees = exitedEmployees.length; // On met à jour le chiffre
+      } else {
+        console.warn("Archivage employés impossible (Table manquante ?) :", empArcErr.message);
+      }
+    }
+
+    return res.json({ status: "success", report: results });
+
+  } catch (err) {
+    console.error("Erreur Maintenance:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 
                 
@@ -4203,6 +4260,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
