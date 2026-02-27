@@ -4188,21 +4188,24 @@ else if (action === 'run-archiving-job') {
       }
     }
 
-    // --- 3. ARCHIVAGE DES EMPLOYÉS "SORTIE" ---
+ 
+// ============================================================
+    // 3. ARCHIVAGE DES EMPLOYÉS "SORTIE"
+    // ============================================================
     const { data: exitedEmployees } = await supabase
       .from("employees")
       .select("*")
       .ilike("statut", "%Sortie%"); 
 
     if (exitedEmployees && exitedEmployees.length > 0) {
-      // Correction : Utilisation d'une table d'archive dans le schéma public
+      // A. On tente de les insérer dans la table d'archive
       const { error: empArcErr } = await supabase.from("employees_archives").insert(exitedEmployees);
 
       if (!empArcErr) {
         const idsToDelete = exitedEmployees.map(e => e.id);
         const userIds = exitedEmployees.map(e => e.user_associated_id).filter(id => id);
         
-        // Note : On supprime l'employé (cela peut échouer si ON DELETE CASCADE n'est pas activé sur les pointages)
+        // B. Note : On supprime l'employé
         const { error: delErr } = await supabase.from("employees").delete().in("id", idsToDelete);
         
         if (!delErr) {
@@ -4222,11 +4225,8 @@ else if (action === 'run-archiving-job') {
     console.error("Erreur Maintenance:", err);
     return res.status(500).json({ error: err.message });
   }
-});
+} // <--- FERME LE BLOC run-archiving-job
 
-                
-
-    // Dans ton bloc "else if" central (router)
 else if (action === 'list-departments') {
     const { data, error } = await supabase
         .from('departments')
@@ -4237,21 +4237,19 @@ else if (action === 'list-departments') {
     if (error) throw error;
     return res.json(data);
 }
-        
-        else {
-            return res.json({ status: "error", message: "Action non gérée" });
-        }
 
-    } catch (err) {
-        console.error(`🔥 Erreur :`, err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
+else {
+    return res.json({ status: "error", message: "Action non gérée" });
+}
 
+} catch (err) {
+    console.error(`🔥 Erreur :`, err.message);
+    res.status(500).json({ error: err.message });
+}
+}); // <--- FERME LE BLOC app.all
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
-
+app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
 
 
 
