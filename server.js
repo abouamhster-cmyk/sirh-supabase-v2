@@ -55,6 +55,25 @@ async function isTargetAuthorized(requester, targetId) {
     return isUnderMe || isInMyScope;
 }
 
+
+  // --- FONCTION PRIVÉE DE CLÔTURE AUTOMATIQUE (INTELLIGENCE MÉTIER) ---
+        function calculateAutoClose(startMs, isSecurity) {
+            const startDate = new Date(startMs);
+            if (isSecurity) {
+                // Pour la sécurité/nuit : Forfait de 12 heures de garde
+                return startMs + (12 * 60 * 60 * 1000);
+            } else {
+                // Pour bureau/mobile : Clôture à 18h00 le jour même
+                const eighteenHour = new Date(startDate);
+                eighteenHour.setHours(18, 0, 0, 0);
+                
+                // Si l'entrée était déjà après 18h, on accorde 1h symbolique, sinon 18h
+                return (startDate.getTime() >= eighteenHour.getTime()) 
+                    ? startDate.getTime() + (60 * 60 * 1000) 
+                    : eighteenHour.getTime();
+            }
+        }  
+
 // Fonction pour vérifier une permission spécifique
 function checkPerm(req, permissionName) {
     return req.user && req.user.permissions && req.user.permissions[permissionName] === true;
@@ -1490,175 +1509,163 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
 
 
 
-// ============================================================
-        // 10. GÉNÉRATEUR DE RAPPORTS (AMPLITUDE + ABSENCES + LIVE) ✅
+       // ============================================================
+        // 10. GÉNÉRATEUR DE RAPPORTS (RECONSTRUCTION CHRONOLOGIQUE LIVE)
         // ============================================================
         else if (action === 'read-report') {
             const isGlobalMode = req.query.mode === 'GLOBAL';
             const isPersonalMode = req.query.mode === 'PERSONAL';
-            
-            if (isGlobalMode && !checkPerm(req, 'can_see_dashboard')) {
-                return res.status(403).json({ error: "Accès refusé aux rapports globaux" });
-            }
-            
             const { period } = req.query;
             const now = new Date();
             const todayStr = now.toISOString().split('T')[0];
 
-            try {
-                // --- ÉTAPE 1 : RÉCUPÉRER LA LISTE DES EMPLOYÉS ATTENDUS ---
-                // On cible les actifs (ceux qui ne sont pas en sortie définitive)
-                let empQuery = supabase.from('employees')
-                    .select('id, nom, matricule, departement, hierarchy_path, statut')
-                    .not('statut', 'ilike', '%sortie%');
+            if (isGlobalMode && !checkPerm(req, 'can_see_dashboard')) {
+                return res.status(403).json({ error: "Accès refusé" });
+            }
 
+            try {
+                // 1. RÉCUPÉRATION DES DONNÉES DE BASE
+                let query = supabase
+                    .from('pointages')
+                    .select('*, employees!inner(nom, matricule, hierarchy_path, departement, employee_type)');
+
+                // Filtre Sécurité (Qui a le droit de voir quoi)
                 if (isPersonalMode) {
-                    empQuery = empQuery.eq('id', req.user.emp_id);
+                    query = query.eq('employee_id', req.user.emp_id);
                 } 
                 else if (isGlobalMode && !checkPerm(req, 'can_see_employees')) {
-                    // Logique Manager (Hierarchy/Scope) identique à la version précédente
-                    const { data: requester } = await supabase.from('employees')
-                        .select('hierarchy_path, management_scope')
-                        .eq('id', req.user.emp_id).single();
-
-                    if (requester) {
-                        let securityConditions = [];
-                        securityConditions.push(`hierarchy_path.eq.${requester.hierarchy_path}`);
-                        securityConditions.push(`hierarchy_path.ilike.${requester.hierarchy_path}/%`);
-                        if (requester.management_scope?.length > 0) {
-                            const scopeList = `(${requester.management_scope.map(s => `"${s}"`).join(',')})`;
-                            securityConditions.push(`departement.in.${scopeList}`);
+                    const { data: reqData } = await supabase.from('employees').select('hierarchy_path, management_scope').eq('id', req.user.emp_id).single();
+                    if (reqData) {
+                        let filterCond = [`employees.hierarchy_path.ilike.${reqData.hierarchy_path}/%`];
+                        if (reqData.management_scope?.length > 0) {
+                            const scopeList = `(${reqData.management_scope.map(s => `"${s}"`).join(',')})`;
+                            filterCond.push(`employees.departement.in.${scopeList}`);
                         }
-                        empQuery = empQuery.or(securityConditions.join(','));
+                        query = query.or(filterCond.join(','));
                     }
                 }
 
-                const { data: employeesList, error: empErr } = await empQuery;
-                if (empErr) throw empErr;
-
-                // --- ÉTAPE 2 : RÉCUPÉRER LES POINTAGES SUR LA PÉRIODE ---
-                let ptgQuery = supabase.from('pointages').select('*');
+                // Filtre de Période
                 if (period === 'today') {
-                    ptgQuery = ptgQuery.gte('heure', `${todayStr}T00:00:00`).lte('heure', `${todayStr}T23:59:59`);
+                    query = query.gte('heure', `${todayStr}T00:00:00`).lte('heure', `${todayStr}T23:59:59`);
                 } else {
                     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-                    ptgQuery = ptgQuery.gte('heure', startOfMonth);
+                    query = query.gte('heure', startOfMonth);
                 }
 
-                const { data: pointages, error: ptgErr } = await ptgQuery.order('heure', { ascending: true });
-                if (ptgErr) throw ptgErr;
+                // Important : On trie par heure pour reconstruire la timeline
+                const { data: pointages, error } = await query.order('heure', { ascending: true });
+                if (error) throw error;
 
-                // --- ÉTAPE 3 : CONSTRUCTION DU RENDU ---
-
+                // --- TRAITEMENT DU MODE AUJOURD'HUI (PRÉSENCES LIVE) ---
                 if (period === 'today') {
-                    const report = employeesList.map(emp => {
-                        const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
-                        const firstIn = sesPointages.find(p => p.action === 'CLOCK_IN');
-                        const lastOut = [...sesPointages].reverse().find(p => p.action === 'CLOCK_OUT' && (p.is_final_out === true || p.is_final_out === 'true'));
+                    const latestByEmp = {};
+                    (pointages || []).forEach(p => {
+                        latestByEmp[p.employee_id] = p; // On garde le dernier état
+                    });
 
-                        let statut = "ABSENT";
-                        let arrivee = "--:--";
-                        let dureeStr = "0h 00m";
-                        let zone = "---";
-
-                        if (firstIn) {
-                            arrivee = new Date(firstIn.heure).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'});
-                            zone = firstIn.zone_detectee || "Bureau";
-                            
-                            // CALCUL DE LA DURÉE (LIVE OU FIXE)
-                            const startTime = new Date(firstIn.heure).getTime();
-                            // Si déjà parti, on calcule jusqu'à la sortie, sinon jusqu'à MAINTENANT (Live)
-                            const endTime = lastOut ? new Date(lastOut.heure).getTime() : now.getTime();
-                            
-                            const diffMs = endTime - startTime;
-                            const diffMins = Math.max(0, Math.floor(diffMs / 60000));
-                            dureeStr = `${Math.floor(diffMins / 60)}h ${(diffMins % 60).toString().padStart(2, '0')}m`;
-                            
-                            statut = lastOut ? "PARTI" : "PRÉSENT";
-                        }
-
-                        // Si la personne est en congé déclaré dans le statut
-                        if (statut === "ABSENT" && emp.statut.toLowerCase().includes('cong')) {
-                            statut = "CONGÉ";
+                    const report = Object.values(latestByEmp).map(p => {
+                        const isCurrentlyIn = (p.action === 'CLOCK_IN');
+                        let dureeDisplay = "0h 00m";
+                        
+                        if (isCurrentlyIn) {
+                            const diffMins = Math.floor((now - new Date(p.heure)) / 60000);
+                            dureeDisplay = `${Math.floor(diffMins / 60)}h ${(diffMins % 60).toString().padStart(2, '0')}m`;
                         }
 
                         return {
-                            nom: emp.nom,
-                            matricule: emp.matricule,
-                            statut: statut,
-                            arrivee: arrivee,
-                            duree: dureeStr,
-                            zone: zone
+                            nom: p.employees.nom,
+                            matricule: p.employees.matricule,
+                            statut: isCurrentlyIn ? "PRÉSENT" : "PARTI",
+                            arrivee: new Date(p.heure).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'}),
+                            zone: p.zone_detectee || "Terrain",
+                            duree: dureeDisplay
                         };
                     });
-
-                    // On trie : les présents en haut
-                    report.sort((a, b) => (a.statut === "PRÉSENT" ? -1 : 1));
                     return res.json(report);
                 } 
                 
+                // --- TRAITEMENT DU MODE MENSUEL (CUMUL INTELLIGENT) ---
                 else {
-                    // --- RENDU MENSUEL (Calcul par jour pour cumul fiable) ---
-                    const monthlySummary = employeesList.map(emp => {
-                        const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
+                    const monthlyStats = {};
+                    const pointsByEmp = {};
+
+                    // Groupement initial
+                    pointages.forEach(p => {
+                        if (!pointsByEmp[p.employee_id]) pointsByEmp[p.employee_id] = [];
+                        pointsByEmp[p.employee_id].push(p);
+                    });
+
+                    for (const empId in pointsByEmp) {
+                        const events = pointsByEmp[empId];
+                        const empInfo = events[0].employees;
+                        const isSecurity = (empInfo.employee_type === 'FIXED' || empInfo.employee_type === 'SECURITY');
                         
-                        // On groupe par date
-                        const jours = {};
-                        sesPointages.forEach(p => {
-                            const d = new Date(p.heure).toISOString().split('T')[0];
-                            if (!jours[d]) jours[d] = { firstIn: null, lastOut: null };
-                            
-                            const time = new Date(p.heure).getTime();
-                            if (p.action === 'CLOCK_IN') {
-                                if (!jours[d].firstIn || time < jours[d].firstIn) jours[d].firstIn = time;
-                            } else if (p.action === 'CLOCK_OUT' && (p.is_final_out === true || p.is_final_out === 'true')) {
-                                if (!jours[d].lastOut || time > jours[d].lastOut) jours[d].lastOut = time;
-                            }
-                        });
+                        if (!monthlyStats[empId]) {
+                            monthlyStats[empId] = { nom: empInfo.nom, totalMs: 0, joursPresence: new Set() };
+                        }
 
-                        let totalMs = 0;
-                        let nbJours = 0;
+                        let pendingInTime = null;
 
-                        Object.keys(jours).forEach(dateStr => {
-                            const j = jours[dateStr];
-                            if (j.firstIn) {
-                                nbJours++;
-                                
-                                let finCalcul = j.lastOut;
-                                
-                                // 👇 LA CORRECTION EST ICI :
-                                // Si pas de sortie ET que c'est aujourd'hui, on utilise l'heure actuelle
-                                if (!finCalcul && dateStr === todayStr) {
-                                    finCalcul = now.getTime();
+                        events.forEach(ev => {
+                            const evTime = new Date(ev.heure).getTime();
+                            const evDateStr = new Date(ev.heure).toLocaleDateString();
+
+                            if (ev.action === 'CLOCK_IN') {
+                                // S'il y avait déjà un IN sans OUT (Oubli du pointage précédent)
+                                if (pendingInTime !== null) {
+                                    monthlyStats[empId].totalMs += (calculateAutoClose(pendingInTime, isSecurity) - pendingInTime);
                                 }
-
-                                if (finCalcul && j.firstIn) {
-                                    const amplitude = finCalcul - j.firstIn;
-                                    if (amplitude > 0) totalMs += amplitude;
+                                pendingInTime = evTime;
+                                monthlyStats[empId].joursPresence.add(evDateStr);
+                            } 
+                            else if (ev.action === 'CLOCK_OUT') {
+                                if (pendingInTime !== null) {
+                                    // Match parfait IN -> OUT
+                                    monthlyStats[empId].totalMs += (evTime - pendingInTime);
+                                    pendingInTime = null;
                                 }
                             }
                         });
 
-                        const totalMinutes = Math.floor(totalMs / 60000);
+                        // --- GESTION DE LA FIN DE TIMELINE (Le pointage actuel) ---
+                        if (pendingInTime !== null) {
+                            const lastInDate = new Date(pendingInTime).toLocaleDateString();
+                            const isStillToday = (lastInDate === now.toLocaleDateString());
+
+                            if (isStillToday) {
+                                // 🟢 CALCUL LIVE : Il est au travail en ce moment
+                                monthlyStats[empId].totalMs += (now.getTime() - pendingInTime);
+                            } else {
+                                // 🔴 OUBLI PASSÉ : On ferme selon la règle
+                                monthlyStats[empId].totalMs += (calculateAutoClose(pendingInTime, isSecurity) - pendingInTime);
+                            }
+                        }
+                    }
+
+                    // Formatage final pour le tableau
+                    const finalReport = Object.values(monthlyStats).map(s => {
+                        const totalMins = Math.floor(s.totalMs / 60000);
+                        const hh = Math.floor(totalMins / 60);
+                        const mm = totalMins % 60;
                         return {
                             mois: now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
-                            nom: emp.nom,
-                            jours: nbJours,
-                            heures: `${Math.floor(totalMinutes / 60)}h ${(totalMinutes % 60).toString().padStart(2, '0')}m`,
-                            Statut: "Validé"
+                            nom: s.nom,
+                            jours: s.joursPresence.size,
+                            heures: `${hh}h ${mm.toString().padStart(2, '0')}m`,
+                            statut: "Validé"
                         };
                     });
 
-                    return res.json(monthlySummary);
+                    return res.json(finalReport);
                 }
             } catch (err) {
-                console.error("Erreur Rapport Impeccable:", err.message);
+                console.error("Erreur Moteur Rapport:", err.message);
                 return res.status(500).json({ error: err.message });
             }
         }
 
-            
-
+      
             
    else if (action === 'ingest-candidate') {
             const b = req.body;
@@ -3873,74 +3880,75 @@ else if (action === 'read-visit-reports') {
 
     
 else if (action === 'get-global-audit') {
-            const { month, year } = req.query;
-            const paddedMonth = String(month).padStart(2, '0');
-            const searchPattern = `${year}-${paddedMonth}`; 
+    const { month, year } = req.query;
+    const paddedMonth = String(month).padStart(2, '0');
+    const searchPattern = `${year}-${paddedMonth}`; 
 
-            try {
-                // --- 1. FILTRE MAGIQUE : On ne prend QUE les employés de type MOBILE ---
-                const { data: emps } = await supabase.from('employees')
-                    .select('id, nom, matricule, poste')
-                    .eq('employee_type', 'MOBILE'); 
+    try {
+        const { data: emps } = await supabase.from('employees').select('id, nom, matricule, poste').eq('employee_type', 'MOBILE'); 
+        const { data: visits } = await supabase.from('visit_reports').select('*');
+        const { data: leaves } = await supabase.from('conges').select('*').eq('statut', 'Validé');
+        const { data: dailies } = await supabase.from('daily_reports').select('*');
+
+        const auditReport = emps.map(e => {
+            const sesVisites = (visits || []).filter(v => {
+                const dateToCheck = v.check_out_time || v.check_in_time || v.created_at;
+                return v.employee_id === e.id && dateToCheck && dateToCheck.includes(searchPattern);
+            });
+
+            const statsLieux = {};
+            const nomsProduitsUniques = new Set(); // Pour lister les noms sans doublons
+            let totalProduits = 0;
+
+            sesVisites.forEach(v => {
+                const nameLieu = v.location_name || "Site inconnu";
+                statsLieux[nameLieu] = (statsLieux[nameLieu] || 0) + 1;
+
+                let prods = [];
+                try {
+                    if (typeof v.presented_products === 'string') prods = JSON.parse(v.presented_products);
+                    else if (Array.isArray(v.presented_products)) prods = v.presented_products;
+                } catch(err){}
                 
-                const { data: visits } = await supabase.from('visit_reports').select('*');
-                const { data: leaves } = await supabase.from('conges').select('*').eq('statut', 'Validé');
-                const { data: dailies } = await supabase.from('daily_reports').select('*');
-
-                const auditReport = emps.map(e => {
-                    const sesVisites = (visits || []).filter(v => {
-                        const dateToCheck = v.check_out_time || v.check_in_time || v.created_at;
-                        return v.employee_id === e.id && dateToCheck && dateToCheck.includes(searchPattern);
-                    });
-
-                    const statsLieux = {};
-                    let totalProduits = 0; // NOUVEAU : Compteur de produits
-
-                    sesVisites.forEach(v => {
-                        const name = v.location_name || "Site inconnu";
-                        statsLieux[name] = (statsLieux[name] || 0) + 1;
-
-                        // NOUVEAU : On compte combien de produits ont été présentés dans cette visite
-                        let prods = [];
-                        try {
-                            if (typeof v.presented_products === 'string') prods = JSON.parse(v.presented_products);
-                            else if (Array.isArray(v.presented_products)) prods = v.presented_products;
-                        } catch(err){}
-                        totalProduits += prods.length;
-                    });
-
-                    const detailLieux = Object.entries(statsLieux)
-                        .map(([n, c]) => `${n} (${c})`)
-                        .join(', ') || "Aucune visite";
-
-                    const sesConges = (leaves || []).filter(l => l.employee_id === e.id && l.date_debut.includes(searchPattern));
-                    let joursAbsence = 0;
-                    sesConges.forEach(l => {
-                        const d1 = new Date(l.date_debut);
-                        const d2 = new Date(l.date_fin);
-                        joursAbsence += Math.ceil(Math.abs(d2 - d1) / (1000 * 60 * 60 * 24)) + 1;
-                    });
-
-                    const sesDailies = (dailies || []).filter(d => d.employee_id === e.id && d.report_date.includes(searchPattern));
-
-                    return {
-                        matricule: e.matricule || 'N/A',
-                        nom: e.nom,
-                        poste: e.poste || 'Délégué',
-                        total_visites: sesVisites.length,
-                        total_produits: totalProduits, // On renvoie ce chiffre au frontend
-                        detail_lieux: detailLieux,
-                        jours_absence: joursAbsence,
-                        dernier_rapport: sesDailies.length > 0 ? sesDailies[sesDailies.length - 1].summary : "Rien à signaler"
-                    };
+                totalProduits += prods.length;
+                prods.forEach(p => {
+                    // On récupère le nom peu importe le format (objet ou texte)
+                    const pName = (typeof p === 'object' && p !== null) ? (p.name || p.NAME || p.Name) : p;
+                    if(pName) nomsProduitsUniques.add(pName);
                 });
+            });
 
-                return res.json(auditReport);
-            } catch (err) {
-                return res.status(500).json({ error: err.message });
-            }
-        }
+            const detailLieux = Object.entries(statsLieux).map(([n, c]) => `${n} (${c})`).join(', ') || "Aucune visite";
+            const detailProduits = Array.from(nomsProduitsUniques).join(', ') || "Aucun produit présenté";
 
+            const sesConges = (leaves || []).filter(l => l.employee_id === e.id && l.date_debut.includes(searchPattern));
+            let joursAbsence = 0;
+            sesConges.forEach(l => {
+                const d1 = new Date(l.date_debut);
+                const d2 = new Date(l.date_fin);
+                joursAbsence += Math.ceil(Math.abs(d2 - d1) / (1000 * 60 * 60 * 24)) + 1;
+            });
+
+            const sesDailies = (dailies || []).filter(d => d.employee_id === e.id && d.report_date.includes(searchPattern));
+
+            return {
+                matricule: e.matricule || 'N/A',
+                nom: e.nom,
+                poste: e.poste || 'Délégué',
+                total_visites: sesVisites.length,
+                total_produits: totalProduits,
+                detail_lieux: detailLieux,
+                detail_produits: detailProduits, // NOUVEAU : La liste des noms
+                jours_absence: joursAbsence,
+                dernier_rapport: sesDailies.length > 0 ? sesDailies[sesDailies.length - 1].summary : "Rien à signaler"
+            };
+        });
+
+        return res.json(auditReport);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+}
 
                
 
@@ -4260,6 +4268,7 @@ else if (action === 'list-departments') {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));  
+
 
 
 
