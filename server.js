@@ -3904,6 +3904,7 @@ else if (action === 'get-global-audit') {
                 const nameLieu = v.location_name || "Site inconnu";
                 statsLieux[nameLieu] = (statsLieux[nameLieu] || 0) + 1;
 
+// ... (à l'intérieur de get-global-audit, dans la boucle sesVisites.forEach)
                 let prods = [];
                 try {
                     if (typeof v.presented_products === 'string') prods = JSON.parse(v.presented_products);
@@ -3912,9 +3913,19 @@ else if (action === 'get-global-audit') {
                 
                 totalProduits += prods.length;
                 prods.forEach(p => {
-                    // On récupère le nom peu importe le format (objet ou texte)
-                    const pName = (typeof p === 'object' && p !== null) ? (p.name || p.NAME || p.Name) : p;
-                    if(pName) nomsProduitsUniques.add(pName);
+                    // --- NETTOYAGE STRICT ICI ---
+                    let pName = "Produit";
+                    if (typeof p === 'object' && p !== null) {
+                        pName = p.name || p.NAME || p.Name;
+                    } else if (typeof p === 'string') {
+                        // Si la chaîne est un JSON (ton bug actuel), on la décode
+                        if (p.startsWith('{')) {
+                            try { pName = JSON.parse(p).name || JSON.parse(p).NAME || "Produit"; } catch(e) { pName = p; }
+                        } else {
+                            pName = p;
+                        }
+                    }
+                    if(pName) nomsProduitsUniques.add(pName.trim());
                 });
             });
 
@@ -4250,6 +4261,7 @@ else {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
+
 
 
 
