@@ -1410,7 +1410,7 @@ else if (action === 'read-leaves') {
                     </div>`;
             }
 
-            // =========================================================
+         // =========================================================
             // CAS 4 : EMBAUCHE (AVEC CRÉATION DE COMPTE)
             // =========================================================
 else if (action_type === 'ACCEPTER_EMBAUCHE') {
@@ -1420,7 +1420,7 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
     const siteLink = "https://dom4002.github.io/sirh-supabase-v2-frontend/";
     const empType = req.body.employee_type || 'OFFICE'; 
     const empDept = req.body.departement || 'À définir';
-    const managerId = req.body.manager_id || null; // Récupération du manager si envoyé par le front
+    const managerId = req.body.manager_id || null;
 
     const { data: existing } = await supabase.from('app_users').select('id').eq('email', username).single();
     
@@ -1430,10 +1430,8 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
         if (newUser) {
             const { data: nextMatricule, error: seqErr } = await supabase.rpc('get_next_formatted_matricule');
             if (seqErr) throw new Error("Erreur de génération de matricule");
-            // -----------------------------------------------------
 
             // --- INITIALISATION DU COMPTE EMPLOYÉ ---
-            // On récupère l'objet inséré (.select().single()) pour avoir son ID et calculer le path
             const { data: newEmp, error: empErr } = await supabase.from('employees').insert([{
                 user_associated_id: newUser.id,
                 matricule: nextMatricule,
@@ -1442,18 +1440,26 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
                 email: username,
                 telephone: candidat.telephone,
                 poste: candidat.poste_vise,
-                departement: empDept, // Utilise maintenant le code (ex: 'IT')
+                departement: empDept,
                 role: "EMPLOYEE",
                 statut: "Actif",
                 date_embauche: new Date().toISOString().split('T')[0],
                 type_contrat: "Essai",
                 solde_conges: 25,
+                // --- ON TRANSFERT LES INFOS DE CANDIDATURE VERS L'EMPLOYÉ ---
+                adresse: candidat.adresse || null,
+                date_naissance: candidat.date_naissance || null,
                 photo_url: candidat.photo_url || null,
+                cv_url: candidat.cv_url || null,
+                lm_url: candidat.lm_url || null,
+                diploma_url: candidat.diploma_url || null,
+                id_card_url: candidat.id_card_url || null,
+                // -----------------------------------------------------------
                 manager_id: managerId
             }]).select().single();
 
             if (!empErr && newEmp) {
-                // --- NOUVEAU : CALCUL AUTOMATIQUE DU HIERARCHY_PATH ---
+                // CALCUL AUTOMATIQUE DU HIERARCHY_PATH
                 let finalPath = String(newEmp.id);
                 if (managerId) {
                     const { data: manager } = await supabase.from('employees')
@@ -1465,7 +1471,6 @@ else if (action_type === 'ACCEPTER_EMBAUCHE') {
                         finalPath = `${manager.hierarchy_path}/${newEmp.id}`;
                     }
                 }
-                // Mise à jour du chemin
                 await supabase.from('employees').update({ hierarchy_path: finalPath }).eq('id', newEmp.id);
             }
         }
@@ -1628,7 +1633,7 @@ else if (action === 'read-report') {
 
       
             
-   else if (action === 'ingest-candidate') {
+else if (action === 'ingest-candidate') {
             const b = req.body;
             console.log(`📥 Candidature reçue. Nom : ${b.nom_complet}`);
 
@@ -1657,6 +1662,12 @@ else if (action === 'read-report') {
                     telephone: b.telephone,
                     poste_vise: b.poste_vise,
                     date_naissance: b.date_naissance || null,
+                    // --- NOUVEAUX CHAMPS AJOUTÉS ICI ---
+                    adresse: b.adresse || null,
+                    experience: b.experience || null,
+                    disponibilite: b.disponibilite || null,
+                    pretentions: b.pretentions || null,
+                    // -----------------------------------
                     cv_url: uploadedDocs.cv_url,
                     lm_url: uploadedDocs.lm_url,
                     diploma_url: uploadedDocs.diploma_url,
@@ -1673,6 +1684,8 @@ else if (action === 'read-report') {
             return res.json({ status: "success" });
         }
 
+
+       
 // ============================================================
         // MISE À JOUR PROFIL (EMPLOYÉ OU RH)
         // ============================================================
@@ -4222,6 +4235,7 @@ else {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
+
 
 
 
