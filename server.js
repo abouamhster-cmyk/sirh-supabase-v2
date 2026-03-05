@@ -3679,122 +3679,86 @@ else if (action === 'read-modules') {
 // VÉRIFIER L'ÉTAT DU BOUTON (CORRIGÉ POUR LE MULTI-VISITES MOBILE) ✅
 // ============================================================
 else if (action === 'get-clock-status') {
-    const { employee_id } = req.query;
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const currentHour = now.getHours(); 
+            const { employee_id } = req.query;
+            if (!employee_id) return res.status(400).json({ error: "ID manquant" });
 
-    try {
-        // 1. Récupérer l'employé et son type
-        const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
-        if (!emp) return res.status(404).json({ error: "Employé non trouvé" });
-        
-        const eType = emp.employee_type; // 'MOBILE', 'OFFICE', 'FIXED'
+            const now = new Date();
+            const todayStr = now.toISOString().split('T')[0];
+            const currentHour = now.getHours();
 
-        // 2. VÉRIFICATION ABSOLUE : Y a-t-il eu une clôture manuelle aujourd'hui ?
-        // (ex: Le délégué a coché la case "Dernière visite")
-        const { data: finalToday } = await supabase
-            .from('pointages')
-            .select('id')
-            .eq('employee_id', employee_id)
-            .eq('is_final_out', true)
-            .gte('heure', `${todayStr}T00:00:00`)
-            .maybeSingle();
+            try {
+                // 1. Récupérer l'employé avec gestion d'erreur sécurisée
+                const { data: emp, error: empErr } = await supabase
+                    .from('employees')
+                    .select('employee_type')
+                    .eq('id', employee_id)
+                    .maybeSingle(); // maybeSingle évite le crash si rien n'est trouvé
 
-        if (finalToday) {
-            return res.json({ status: 'DONE', day_finished: true });
-        }
+                if (empErr) throw empErr;
+                if (!emp) return res.json({ status: 'OUT', employee_type: 'OFFICE', day_finished: false }); // Retour par défaut
+                
+                const eType = emp.employee_type || 'OFFICE';
+                const isGuard = (eType === 'FIXED'); 
+                const isStandard = (eType === 'OFFICE' || eType === 'MOBILE');
 
-        // 3. LOGIQUE DE CLÔTURE AUTOMATIQUE 
-        // À 20h, on ferme la journée pour le bureau et les délégués
-        if ((eType === 'OFFICE' || eType === 'MOBILE') && currentHour >= 20) {
-            return res.json({ status: 'DONE', day_finished: true, message: "Système clôturé à 20h" });
-        }
+                // 2. VÉRIFICATION : Clôture manuelle aujourd'hui ?
+                const { data: finalToday } = await supabase
+                    .from('pointages')
+                    .select('id')
+                    .eq('employee_id', employee_id)
+                    .eq('is_final_out', true)
+                    .gte('heure', `${todayStr}T00:00:00`)
+                    .maybeSingle();
 
-        // Si le dernier pointage est une ENTRÉE qui date de plus de 18h
-        if (lastRecord && lastRecord.action === 'CLOCK_IN') {
-            const diffHours = (now - new Date(lastRecord.heure)) / (1000 * 60 * 60);
-            if (diffHours > 18) {
-                // L'agent a oublié de sortir hier soir !
-                // On crée une sortie automatique à 18h00 pour "nettoyer" la base
-                const autoOutTime = new Date(lastRecord.heure);
-                autoOutTime.setHours(18, 0, 0, 0);
-        
-                await supabase.from('pointages').insert([{
-                    employee_id: employee_id,
-                    action: 'CLOCK_OUT',
-                    heure: autoOutTime,
-                    zone_detectee: 'AUTO_CORRECTION_OUBLI',
-                    is_final_out: true
-                }]);
-                // On rafraîchit le statut pour qu'il soit OUT
-                status = 'OUT';
-                lastRecord.action = 'CLOCK_OUT'; 
-            }
-        }
-        
-        
-        // 4. RÉCUPÉRER LE DERNIER POINTAGE
-        const { data: lastRecord } = await supabase
-            .from('pointages')
-            .select('action, heure')
-            .eq('employee_id', employee_id)
-            .order('heure', { ascending: false })
-            .limit(1)
-            .maybeSingle();
+                if (finalToday) return res.json({ status: 'DONE', day_finished: true });
 
-        let status = 'OUT';
-        let isDayFinished = false;
+                // 3. RÉCUPÉRER LE DERNIER POINTAGE
+                const { data: lastRecord, error: ptgErr } = await supabase
+                    .from('pointages')
+                    .select('action, heure')
+                    .eq('employee_id', employee_id)
+                    .order('heure', { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
 
-        if (lastRecord) {
-            const lastTime = new Date(lastRecord.heure);
-            const isToday = lastTime.toISOString().split('T')[0] === todayStr;
-            const diffHours = (now - lastTime) / (1000 * 60 * 60);
+                if (ptgErr) throw ptgErr;
 
-            // --- SI LE DERNIER GESTE EST UNE ENTRÉE ---
-            if (lastRecord.action === 'CLOCK_IN') {
-                if (eType === 'FIXED') {
-                    if (diffHours < 18) status = 'IN';
-                } 
-                else {
-                    if (isToday && diffHours < 14) {
-                        status = 'IN';
-                    } else {
-                        status = 'OUT'; // Oubli de sortie de la veille, on reset
+                let status = 'OUT';
+                let isDayFinished = false;
+
+                if (lastRecord) {
+                    const lastTime = new Date(lastRecord.heure);
+                    const diffHours = (now - lastTime) / (1000 * 60 * 60);
+
+                    if (lastRecord.action === 'CLOCK_IN') {
+                        if (isGuard) {
+                            if (diffHours < 18) status = 'IN';
+                        } else {
+                            if (lastTime.toISOString().split('T')[0] === todayStr && diffHours < 14) status = 'IN';
+                            else status = 'OUT';
+                        }
+                    } else if (lastRecord.action === 'CLOCK_OUT') {
+                        if (isStandard && lastTime.toISOString().split('T')[0] === todayStr) {
+                            status = 'DONE';
+                            isDayFinished = true;
+                        } else {
+                            status = 'OUT';
+                        }
                     }
                 }
-            } 
-            // --- SI LE DERNIER GESTE EST UNE SORTIE ---
-            else if (lastRecord.action === 'CLOCK_OUT') {
-                
-                if (eType === 'OFFICE' && isToday) {
-                    // BUREAU : Une seule sortie par jour suffit
-                    status = 'DONE';
-                    isDayFinished = true;
-                } 
-                else if (eType === 'MOBILE') {
-                    // DÉLÉGUÉ : Il vient de sortir d'une pharmacie, on le remet en "ENTRÉE" (Vert) pour la suivante.
-                    // (Si c'était sa dernière, la condition 'finalToday' en haut l'aurait déjà bloqué en DONE)
-                    status = 'OUT';
-                }
-                else if (eType === 'FIXED') {
-                    status = 'OUT';
-                }
+
+                return res.json({ 
+                    status: status, 
+                    employee_type: eType,
+                    day_finished: isDayFinished
+                });
+
+            } catch (err) {
+                console.error("Erreur serveur get-clock-status:", err.message);
+                // Au lieu de crash (500), on renvoie un état neutre et on log l'erreur
+                return res.status(500).json({ error: err.message });
             }
-        }
-
-        return res.json({ 
-            status: status, 
-            employee_type: eType,
-            day_finished: isDayFinished
-        });
-
-    } catch (err) {
-        console.error("Erreur status:", err.message);
-        return res.status(500).json({ error: err.message });
-    }
-}
-        
+        }     
 
 
 
@@ -4315,6 +4279,7 @@ else {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
+
 
 
 
