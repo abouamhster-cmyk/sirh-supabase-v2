@@ -3672,96 +3672,102 @@ else if (action === 'read-modules') {
         }
 
         
- // ============================================================
-        // VÉRIFIER L'ÉTAT DU BOUTON (VÉRIF UNIVERSELLE DU FINAL_OUT) ✅
-        // ============================================================
+      // ============================================================
+// VÉRIFIER L'ÉTAT DU BOUTON (CORRIGÉ POUR LE MULTI-VISITES MOBILE) ✅
+// ============================================================
 else if (action === 'get-clock-status') {
-            const { employee_id } = req.query;
-            const now = new Date();
-            const todayStr = now.toISOString().split('T')[0];
-            const currentHour = now.getHours(); // Récupère l'heure (0-23)
+    const { employee_id } = req.query;
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const currentHour = now.getHours(); 
 
-            try {
-                // 1. Récupérer l'employé et son type
-                const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
-                if (!emp) return res.status(404).json({ error: "Employé non trouvé" });
-                
-                const isGuard = (emp.employee_type === 'FIXED'); // FIXED = Agent Site / Gardien
-                const isStandard = (emp.employee_type === 'OFFICE' || emp.employee_type === 'MOBILE');
+    try {
+        // 1. Récupérer l'employé et son type
+        const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
+        if (!emp) return res.status(404).json({ error: "Employé non trouvé" });
+        
+        const eType = emp.employee_type; // 'MOBILE', 'OFFICE', 'FIXED'
 
-                // 2. VÉRIFICATION : Clôture manuelle aujourd'hui ?
-                const { data: finalToday } = await supabase
-                    .from('pointages')
-                    .select('id')
-                    .eq('employee_id', employee_id)
-                    .eq('is_final_out', true)
-                    .gte('heure', `${todayStr}T00:00:00`)
-                    .maybeSingle();
+        // 2. VÉRIFICATION ABSOLUE : Y a-t-il eu une clôture manuelle aujourd'hui ?
+        // (ex: Le délégué a coché la case "Dernière visite")
+        const { data: finalToday } = await supabase
+            .from('pointages')
+            .select('id')
+            .eq('employee_id', employee_id)
+            .eq('is_final_out', true)
+            .gte('heure', `${todayStr}T00:00:00`)
+            .maybeSingle();
 
-                if (finalToday) {
-                    return res.json({ status: 'DONE', day_finished: true });
-                }
+        if (finalToday) {
+            return res.json({ status: 'DONE', day_finished: true });
+        }
 
-                // 3. LOGIQUE DE CLÔTURE AUTOMATIQUE (Oublis de fin de journée)
-                // Si on est après 20h et que ce n'est PAS un gardien
-                if (isStandard && currentHour >= 20) {
-                    return res.json({ status: 'DONE', day_finished: true, message: "Système clôturé à 20h" });
-                }
+        // 3. LOGIQUE DE CLÔTURE AUTOMATIQUE 
+        // À 20h, on ferme la journée pour le bureau et les délégués
+        if ((eType === 'OFFICE' || eType === 'MOBILE') && currentHour >= 20) {
+            return res.json({ status: 'DONE', day_finished: true, message: "Système clôturé à 20h" });
+        }
 
-                // 4. RÉCUPÉRER LE DERNIER POINTAGE
-                const { data: lastRecord } = await supabase
-                    .from('pointages')
-                    .select('action, heure')
-                    .eq('employee_id', employee_id)
-                    .order('heure', { ascending: false })
-                    .limit(1)
-                    .maybeSingle();
+        // 4. RÉCUPÉRER LE DERNIER POINTAGE
+        const { data: lastRecord } = await supabase
+            .from('pointages')
+            .select('action, heure')
+            .eq('employee_id', employee_id)
+            .order('heure', { ascending: false })
+            .limit(1)
+            .maybeSingle();
 
-                let status = 'OUT';
-                let isDayFinished = false;
+        let status = 'OUT';
+        let isDayFinished = false;
 
-                if (lastRecord) {
-                    const lastTime = new Date(lastRecord.heure);
-                    const diffHours = (now - lastTime) / (1000 * 60 * 60);
+        if (lastRecord) {
+            const lastTime = new Date(lastRecord.heure);
+            const isToday = lastTime.toISOString().split('T')[0] === todayStr;
+            const diffHours = (now - lastTime) / (1000 * 60 * 60);
 
-                    if (lastRecord.action === 'CLOCK_IN') {
-                        // SI C'EST UN GARDIEN (FIXED) : On autorise jusqu'à 18h de présence (même après minuit)
-                        if (isGuard) {
-                            if (diffHours < 18) status = 'IN';
-                        } 
-                        // SI C'EST UN STANDARD : On n'autorise la sortie que si l'entrée est d'AUJOURD'HUI
-                        else {
-                            if (lastTime.toISOString().split('T')[0] === todayStr && diffHours < 14) {
-                                status = 'IN';
-                            } else {
-                                // Oubli de sortie hier -> On reset pour aujourd'hui
-                                status = 'OUT';
-                            }
-                        }
-                    } 
-                    else if (lastRecord.action === 'CLOCK_OUT') {
-                        // Pour les standards : si déjà sorti aujourd'hui, c'est fini.
-                        if (isStandard && lastTime.toISOString().split('T')[0] === todayStr) {
-                            status = 'DONE';
-                            isDayFinished = true;
-                        } else {
-                            status = 'OUT';
-                        }
+            // --- SI LE DERNIER GESTE EST UNE ENTRÉE ---
+            if (lastRecord.action === 'CLOCK_IN') {
+                if (eType === 'FIXED') {
+                    if (diffHours < 18) status = 'IN';
+                } 
+                else {
+                    if (isToday && diffHours < 14) {
+                        status = 'IN';
+                    } else {
+                        status = 'OUT'; // Oubli de sortie de la veille, on reset
                     }
                 }
-
-                return res.json({ 
-                    status: status, 
-                    employee_type: emp.employee_type,
-                    day_finished: isDayFinished
-                });
-
-            } catch (err) {
-                console.error("Erreur status:", err.message);
-                return res.status(500).json({ error: err.message });
+            } 
+            // --- SI LE DERNIER GESTE EST UNE SORTIE ---
+            else if (lastRecord.action === 'CLOCK_OUT') {
+                
+                if (eType === 'OFFICE' && isToday) {
+                    // BUREAU : Une seule sortie par jour suffit
+                    status = 'DONE';
+                    isDayFinished = true;
+                } 
+                else if (eType === 'MOBILE') {
+                    // DÉLÉGUÉ : Il vient de sortir d'une pharmacie, on le remet en "ENTRÉE" (Vert) pour la suivante.
+                    // (Si c'était sa dernière, la condition 'finalToday' en haut l'aurait déjà bloqué en DONE)
+                    status = 'OUT';
+                }
+                else if (eType === 'FIXED') {
+                    status = 'OUT';
+                }
             }
         }
-            
+
+        return res.json({ 
+            status: status, 
+            employee_type: eType,
+            day_finished: isDayFinished
+        });
+
+    } catch (err) {
+        console.error("Erreur status:", err.message);
+        return res.status(500).json({ error: err.message });
+    }
+}
         
    
 else if (action === 'read-visit-reports') {
@@ -4235,6 +4241,7 @@ else {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
+
 
 
 
