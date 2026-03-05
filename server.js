@@ -1585,53 +1585,58 @@ else if (action === 'read-report') {
                     return res.json(report.sort((a,b) => a.statut === "PRÉSENT" ? -1 : 1));
                 }
 
-                // 4. LOGIQUE MENSUELLE (RECONSTRUCTION + LIVE)
-                else {
-                    const report = employeesList.map(emp => {
-                        const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
-                        const isSecurity = (emp.employee_type === 'FIXED' || emp.employee_type === 'SECURITY');
-                        
-                        let totalMs = 0;
-                        let joursSet = new Set();
-                        let pendingIn = null;
+                    
+                
+// 4. LOGIQUE MENSUELLE (RECONSTRUCTION + LIVE)
+        else {
+            const report = employeesList.map(emp => {
+                const sesPointages = (pointages || []).filter(p => p.employee_id === emp.id);
+                const isSecurity = (emp.employee_type === 'FIXED' || emp.employee_type === 'SECURITY');
+                
+                const days = {};
+                sesPointages.forEach(p => {
+                    const date = new Date(p.heure).toISOString().split('T')[0];
+                    const time = new Date(p.heure).getTime();
+                    if (!days[date]) days[date] = { min: time, max: time };
+                    if (time < days[date].min) days[date].min = time;
+                    if (time > days[date].max) days[date].max = time;
+                });
 
-                        sesPointages.forEach(p => {
-                            const time = new Date(p.heure).getTime();
-                            joursSet.add(new Date(p.heure).toLocaleDateString());
+                let totalMs = 0;
+                let joursCount = 0;
 
-                            if (p.action === 'CLOCK_IN') {
-                                if (pendingIn) totalMs += (calculateAutoClose(pendingIn, isSecurity) - pendingIn);
-                                pendingIn = time;
-                            } else {
-                                if (pendingIn) {
-                                    totalMs += (time - pendingIn);
-                                    pendingIn = null;
-                                }
-                            }
-                        });
+                Object.keys(days).forEach(date => {
+                    const day = days[date];
+                    const isToday = (date === todayStr);
 
-                        // Gestion de la session en cours (Aujourd'hui) ou oubli final
-                        if (pendingIn) {
-                            if (new Date(pendingIn).toLocaleDateString() === now.toLocaleDateString()) {
-                                totalMs += (now.getTime() - pendingIn); // Ajout live
-                            } else {
-                                totalMs += (calculateAutoClose(pendingIn, isSecurity) - pendingIn);
-                            }
+                    if (isToday) {
+                        const endTime = (day.max > day.min) ? day.max : now.getTime();
+                        totalMs += (endTime - day.min);
+                    } else {
+                        if (day.max === day.min) {
+                            totalMs += (calculateAutoClose(day.min, isSecurity) - day.min);
+                        } else {
+                            totalMs += (day.max - day.min);
                         }
+                    }
+                    joursCount++;
+                });
 
-                        const tMins = Math.floor(totalMs / 60000);
-                        return {
-                            mois: now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
-                            nom: emp.nom,
-                            jours: joursSet.size,
-                            heures: `${Math.floor(tMins / 60)}h ${(tMins % 60).toString().padStart(2, '0')}m`
-                        };
-                    });
-                    return res.json(report);
-                }
-            } catch (err) { return res.status(500).json({ error: err.message }); }
+                const tMins = Math.floor(totalMs / 60000);
+                return {
+                    mois: now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
+                    nom: emp.nom,
+                    jours: joursCount,
+                    heures: `${Math.floor(tMins / 60)}h ${(tMins % 60).toString().padStart(2, '0')}m`
+                };
+            });
+            return res.json(report);
         }
-
+    } catch (err) {
+        console.error("Erreur read-report:", err.message);
+        return res.status(500).json({ error: err.message });
+    }
+}
       
             
 else if (action === 'ingest-candidate') {
@@ -4278,6 +4283,7 @@ app.listen(PORT, () => {
     console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`);
     startCronJobs(); 
 });
+
 
 
 
