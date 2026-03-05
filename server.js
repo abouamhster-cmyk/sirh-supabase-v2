@@ -56,26 +56,23 @@ async function isTargetAuthorized(requester, targetId) {
 }
 
 
-function calculateAutoClose(startMs, isSecurity) {
-    const startDate = new Date(startMs);
-    
-    if (isSecurity) {
-        // --- PROFIL SÉCURITÉ / GARDE ---
-        // On autorise jusqu'à 14h d'amplitude (travail de nuit)
-        // Si l'agent dépasse 14h, c'est une anomalie, on clôture à +12h par défaut
-        return startMs + (12 * 60 * 60 * 1000);
-    } else {
-        // --- PROFIL STANDARD (OFFICE/MOBILE) ---
-        const closing = new Date(startDate);
-        // Clôture automatique à 22h00 pour éviter de bloquer le pointage du lendemain
-        closing.setHours(22, 0, 0, 0); 
-        
-        // Si l'entrée était après 22h, c'est une anomalie, on clôture à +8h
-        return (startDate.getTime() >= closing.getTime()) 
-            ? startDate.getTime() + (8 * 60 * 60 * 1000) 
-            : closing.getTime();
-    }
-} 
+  // --- FONCTION PRIVÉE DE CLÔTURE AUTOMATIQUE (INTELLIGENCE MÉTIER) ---
+        function calculateAutoClose(startMs, isSecurity) {
+            const startDate = new Date(startMs);
+            if (isSecurity) {
+                // Pour la sécurité/nuit : Forfait de 12 heures de garde
+                return startMs + (12 * 60 * 60 * 1000);
+            } else {
+                // Pour bureau/mobile : Clôture à 18h00 le jour même
+                const eighteenHour = new Date(startDate);
+                eighteenHour.setHours(18, 0, 0, 0);
+                
+                // Si l'entrée était déjà après 18h, on accorde 1h symbolique, sinon 18h
+                return (startDate.getTime() >= eighteenHour.getTime()) 
+                    ? startDate.getTime() + (60 * 60 * 1000) 
+                    : eighteenHour.getTime();
+            }
+        }  
 
 // Fonction pour vérifier une permission spécifique
 function checkPerm(req, permissionName) {
@@ -3675,31 +3672,22 @@ else if (action === 'read-modules') {
         }
 
         
-      // ============================================================
-// VÉRIFIER L'ÉTAT DU BOUTON (CORRIGÉ POUR LE MULTI-VISITES MOBILE) ✅
-// ============================================================
+ // ============================================================
+        // VÉRIFIER L'ÉTAT DU BOUTON (VÉRIF UNIVERSELLE DU FINAL_OUT) ✅
+        // ============================================================
 else if (action === 'get-clock-status') {
             const { employee_id } = req.query;
-            if (!employee_id) return res.status(400).json({ error: "ID manquant" });
-
             const now = new Date();
             const todayStr = now.toISOString().split('T')[0];
-            const currentHour = now.getHours();
+            const currentHour = now.getHours(); // Récupère l'heure (0-23)
 
             try {
-                // 1. Récupérer l'employé avec gestion d'erreur sécurisée
-                const { data: emp, error: empErr } = await supabase
-                    .from('employees')
-                    .select('employee_type')
-                    .eq('id', employee_id)
-                    .maybeSingle(); // maybeSingle évite le crash si rien n'est trouvé
-
-                if (empErr) throw empErr;
-                if (!emp) return res.json({ status: 'OUT', employee_type: 'OFFICE', day_finished: false }); // Retour par défaut
+                // 1. Récupérer l'employé et son type
+                const { data: emp } = await supabase.from('employees').select('employee_type').eq('id', employee_id).single();
+                if (!emp) return res.status(404).json({ error: "Employé non trouvé" });
                 
-                const eType = emp.employee_type || 'OFFICE';
-                const isGuard = (eType === 'FIXED'); 
-                const isStandard = (eType === 'OFFICE' || eType === 'MOBILE');
+                const isGuard = (emp.employee_type === 'FIXED'); // FIXED = Agent Site / Gardien
+                const isStandard = (emp.employee_type === 'OFFICE' || emp.employee_type === 'MOBILE');
 
                 // 2. VÉRIFICATION : Clôture manuelle aujourd'hui ?
                 const { data: finalToday } = await supabase
@@ -3710,18 +3698,24 @@ else if (action === 'get-clock-status') {
                     .gte('heure', `${todayStr}T00:00:00`)
                     .maybeSingle();
 
-                if (finalToday) return res.json({ status: 'DONE', day_finished: true });
+                if (finalToday) {
+                    return res.json({ status: 'DONE', day_finished: true });
+                }
 
-                // 3. RÉCUPÉRER LE DERNIER POINTAGE
-                const { data: lastRecord, error: ptgErr } = await supabase
+                // 3. LOGIQUE DE CLÔTURE AUTOMATIQUE (Oublis de fin de journée)
+                // Si on est après 20h et que ce n'est PAS un gardien
+                if (isStandard && currentHour >= 20) {
+                    return res.json({ status: 'DONE', day_finished: true, message: "Système clôturé à 20h" });
+                }
+
+                // 4. RÉCUPÉRER LE DERNIER POINTAGE
+                const { data: lastRecord } = await supabase
                     .from('pointages')
                     .select('action, heure')
                     .eq('employee_id', employee_id)
                     .order('heure', { ascending: false })
                     .limit(1)
                     .maybeSingle();
-
-                if (ptgErr) throw ptgErr;
 
                 let status = 'OUT';
                 let isDayFinished = false;
@@ -3731,13 +3725,22 @@ else if (action === 'get-clock-status') {
                     const diffHours = (now - lastTime) / (1000 * 60 * 60);
 
                     if (lastRecord.action === 'CLOCK_IN') {
+                        // SI C'EST UN GARDIEN (FIXED) : On autorise jusqu'à 18h de présence (même après minuit)
                         if (isGuard) {
                             if (diffHours < 18) status = 'IN';
-                        } else {
-                            if (lastTime.toISOString().split('T')[0] === todayStr && diffHours < 14) status = 'IN';
-                            else status = 'OUT';
+                        } 
+                        // SI C'EST UN STANDARD : On n'autorise la sortie que si l'entrée est d'AUJOURD'HUI
+                        else {
+                            if (lastTime.toISOString().split('T')[0] === todayStr && diffHours < 14) {
+                                status = 'IN';
+                            } else {
+                                // Oubli de sortie hier -> On reset pour aujourd'hui
+                                status = 'OUT';
+                            }
                         }
-                    } else if (lastRecord.action === 'CLOCK_OUT') {
+                    } 
+                    else if (lastRecord.action === 'CLOCK_OUT') {
+                        // Pour les standards : si déjà sorti aujourd'hui, c'est fini.
                         if (isStandard && lastTime.toISOString().split('T')[0] === todayStr) {
                             status = 'DONE';
                             isDayFinished = true;
@@ -3749,65 +3752,18 @@ else if (action === 'get-clock-status') {
 
                 return res.json({ 
                     status: status, 
-                    employee_type: eType,
+                    employee_type: emp.employee_type,
                     day_finished: isDayFinished
                 });
 
             } catch (err) {
-                console.error("Erreur serveur get-clock-status:", err.message);
-                // Au lieu de crash (500), on renvoie un état neutre et on log l'erreur
+                console.error("Erreur status:", err.message);
                 return res.status(500).json({ error: err.message });
             }
-        }     
-
-
-
-else if (action === 'force-close-day') {
-    const { id, agent } = req.body;
-
-    try {
-        // 1. Chercher la dernière visite OUVERTE (sans check_out_time)
-        const { data: lastVisit } = await supabase
-            .from('visit_reports')
-            .select('id, check_in_time')
-            .eq('employee_id', id)
-            .is('check_out_time', null)
-            .order('check_in_time', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-        // 2. Déterminer l'heure de clôture (Forfait 18h pour tout le monde ou config personnalisée)
-        const autoOut = new Date();
-        autoOut.setHours(18, 0, 0, 0);
-
-        // 3. Si une visite est en cours, on la ferme proprement
-        if (lastVisit) {
-            const duration = Math.round((autoOut - new Date(lastVisit.check_in_time)) / (1000 * 60));
-            await supabase.from('visit_reports').update({
-                check_out_time: autoOut,
-                duration_minutes: duration > 0 ? duration : 1,
-                notes: "AUTO-CLÔTURE PAR L'AGENT (OUBLI)"
-            }).eq('id', lastVisit.id);
         }
-
-        // 4. Insérer le pointage de sortie pour l'historique
-        await supabase.from('pointages').insert([{
-            employee_id: id,
-            action: 'CLOCK_OUT',
-            heure: autoOut,
-            zone_detectee: 'REGULARISATION_OUBLI',
-            is_final_out: true
-        }]);
+            
         
-        await supabase.from('employees').update({ statut: 'Actif' }).eq('id', id);
-        return res.json({ status: "success" });
-
-    } catch (e) {
-        return res.status(500).json({ error: e.message });
-    }
-}
-    
-        
+   
 else if (action === 'read-visit-reports') {
     try {
         // Paramètres de pagination
@@ -4279,10 +4235,6 @@ else {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`));
-
-
-
-
 
 
 
