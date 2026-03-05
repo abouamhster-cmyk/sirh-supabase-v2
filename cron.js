@@ -1,7 +1,7 @@
 const cron = require('node-cron');
 const supabase = require('./supabaseClient');
 const pLimit = require('p-limit');
-const limit = pLimit(5); // On traite 5 employés à la fois
+const limit = pLimit(5);
 
 const startCronJobs = () => {
     // Tous les jours à 22h00
@@ -13,13 +13,11 @@ const startCronJobs = () => {
                 .select('id, employee_type')
                 .eq('statut', 'En Poste');
 
-            if (error || !enPoste) return;
+            if (error || !enPoste || enPoste.length === 0) return;
 
             const tasks = enPoste.map(emp => limit(async () => {
-                // On exclut les FIXES/SECURITY qui travaillent de nuit
                 if (emp.employee_type === 'FIXED' || emp.employee_type === 'SECURITY') return;
 
-                // Clôture automatique
                 await supabase.from('pointages').insert([{
                     employee_id: emp.id,
                     action: 'CLOCK_OUT',
@@ -33,7 +31,9 @@ const startCronJobs = () => {
             }));
 
             await Promise.all(tasks);
-        } catch (err) { console.error("Erreur Cron :", err); }
+        } catch (err) { 
+            console.error("Erreur Cron :", err); 
+        }
     });
 };
 
