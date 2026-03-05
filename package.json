@@ -16,6 +16,7 @@
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^7.0.13",
     "docxtemplater": "^3.42.0", 
+    "node-cron": "^3.0.3",
     "pizzip": "^3.1.6",
     "libreoffice-convert": "^1.6.0",
     "docxtemplater-image-module-free": "^1.1.1",
@@ -23,6 +24,7 @@
     "image-size": "^1.0.2"
   }
 }
+
 
 
 
