@@ -4226,9 +4226,10 @@ else if (action === 'clock') {
 
 
 
-    else if (action === 'attendance-status') {
+   else if (action === 'attendance-status') {
     const { id } = req.query;
     try {
+        // 1. Chercher le dernier pointage
         const { data: lastPointage } = await supabase
             .from('pointages')
             .select('action, is_final_out')
@@ -4237,18 +4238,24 @@ else if (action === 'clock') {
             .limit(1)
             .maybeSingle();
 
-        // Logique : Si pas de pointage ou si le dernier est une sortie finale
-        if (!lastPointage || lastPointage.is_final_out === true) {
-            return res.json({ action: 'CLOCK_IN', can_clock: true });
-        } else {
-            // S'il a fait un IN, le prochain est un OUT
+        // 2. LOGIQUE :
+        // Si la journée est clôturée (is_final_out == true), on bloque tout (DONE)
+        if (lastPointage && lastPointage.is_final_out === true) {
+            return res.json({ action: 'DONE', can_clock: false });
+        }
+        
+        // Si le dernier pointage est un IN, alors le délégué est en visite, il doit sortir (CLOCK_OUT)
+        if (lastPointage && lastPointage.action === 'CLOCK_IN') {
             return res.json({ action: 'CLOCK_OUT', can_clock: true });
         }
+
+        // Sinon (dernière action est OUT ou c'est le début de journée), il doit entrer (CLOCK_IN)
+        return res.json({ action: 'CLOCK_IN', can_clock: true });
+
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
 }
-
     
 
 
@@ -4271,6 +4278,7 @@ app.listen(PORT, () => {
     console.log(`🚀 SERVEUR V2 SUPABASE PRÊT : Port ${PORT}`);
     startCronJobs(); 
 });
+
 
 
 
